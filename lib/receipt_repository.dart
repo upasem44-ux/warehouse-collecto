@@ -1,14 +1,65 @@
-import 'package:intl/intl.dart';
 import 'package:sqflite/sqflite.dart';
 import 'database_helper.dart';
 
-enum CurrencyType { yer, sar, usd }
-enum ReceiptStatus { draft, pending, posted }
+enum CurrencyType {
+  yer,
+  sar,
+  usd,
+}
 
-typedef CustomerRecord = Map<String, Object?>;
+enum ReceiptStatus {
+  draft,
+  pending,
+  posted,
+}
+
+class CustomerRecord {
+  final String code;
+  final String name;
+  final String area;
+  final String phone;
+  final double balanceYer;
+  final double balanceSar;
+  final double balanceUsd;
+
+  const CustomerRecord({
+    required this.code,
+    required this.name,
+    this.area = '',
+    this.phone = '',
+    this.balanceYer = 0,
+    this.balanceSar = 0,
+    this.balanceUsd = 0,
+  });
+
+  factory CustomerRecord.fromMap(Map<String, Object?> map) {
+    return CustomerRecord(
+      code: map['code'] as String,
+      name: map['name'] as String,
+      area: map['area'] as String? ?? '',
+      phone: map['phone'] as String? ?? '',
+      balanceYer: (map['balance_yer'] as num?)?.toDouble() ?? 0,
+      balanceSar: (map['balance_sar'] as num?)?.toDouble() ?? 0,
+      balanceUsd: (map['balance_usd'] as num?)?.toDouble() ?? 0,
+    );
+  }
+
+  Map<String, Object?> toMap() => {
+        'code': code.trim(),
+        'name': name.trim(),
+        'area': area.trim(),
+        'phone': phone.trim(),
+        'balance_yer': balanceYer,
+        'balance_sar': balanceSar,
+        'balance_usd': balanceUsd,
+        'updated_at': DateTime.now().toIso8601String(),
+      };
+}
 
 class Receipt {
+  final int? id;
   final String number;
+  final String distributorCode;
   final String customerCode;
   final String customerName;
   final double amount;
@@ -16,12 +67,16 @@ class Receipt {
   final String method;
   final String? network;
   final String? transferRef;
-  final String note;
+  final String? note;
   final ReceiptStatus status;
   final DateTime createdAt;
+  final String shiftDate;
+  final String syncStatus;
 
   const Receipt({
+    this.id,
     required this.number,
+    required this.distributorCode,
     required this.customerCode,
     required this.customerName,
     required this.amount,
@@ -29,213 +84,105 @@ class Receipt {
     required this.method,
     this.network,
     this.transferRef,
-    required this.note,
+    this.note,
     required this.status,
     required this.createdAt,
+    required this.shiftDate,
+    this.syncStatus = 'pending',
   });
 
-  factory Receipt.fromDatabase(Map<String, Object?> row) {
+  factory Receipt.fromMap(Map<String, Object?> map) {
     return Receipt(
-      number: row['number'] as String,
-      customerCode: row['customer_code'] as String,
-      customerName: row['customer_name'] as String,
-      amount: (row['amount'] as num).toDouble(),
+      id: map['id'] as int?,
+      number: map['number'] as String,
+      distributorCode: map['distributor_code'] as String,
+      customerCode: map['customer_code'] as String,
+      customerName: map['customer_name'] as String,
+      amount: (map['amount'] as num).toDouble(),
       currency: CurrencyType.values.firstWhere(
-        (e) => e.name == row['currency'],
+        (e) => e.name == map['currency'],
         orElse: () => CurrencyType.yer,
       ),
-      method: row['method'] as String,
-      network: row['network'] as String?,
-      transferRef: row['transfer_ref'] as String?,
-      note: row['note'] as String? ?? '',
+      method: map['method'] as String,
+      network: map['network'] as String?,
+      transferRef: map['transfer_ref'] as String?,
+      note: map['note'] as String?,
       status: ReceiptStatus.values.firstWhere(
-        (e) => e.name == row['status'],
-        orElse: () => ReceiptStatus.draft,
+        (e) => e.name == map['status'],
+        orElse: () => ReceiptStatus.pending,
       ),
-      createdAt: DateTime.parse(row['created_at'] as String),
+      createdAt: DateTime.parse(map['created_at'] as String),
+      shiftDate: map['shift_date'] as String,
+      syncStatus: map['sync_status'] as String? ?? 'pending',
     );
   }
-}
 
-class ReceiptPersistenceException implements Exception {
-  final String message;
-  ReceiptPersistenceException(this.message);
-  @override
-  String toString() => message;
+  Map<String, Object?> toMap() => {
+        'number': number,
+        'distributor_code': distributorCode,
+        'customer_code': customerCode,
+        'customer_name': customerName,
+        'amount': amount,
+        'currency': currency.name,
+        'method': method,
+        'network': network,
+        'transfer_ref': transferRef,
+        'note': note,
+        'status': status.name,
+        'created_at': createdAt.toIso8601String(),
+        'shift_date': shiftDate,
+        'sync_status': syncStatus,
+      };
 }
 
 class ReceiptRepository {
-  final DatabaseHelper _helper;
+  final DatabaseHelper _helper = DatabaseHelper.instance;
 
-  ReceiptRepository({DatabaseHelper? helper})
-      : _helper = helper ?? DatabaseHelper.instance;
+  static const String distributorCode = '1001';
 
-  String _dateKey([DateTime? date]) =>
-      DateFormat('yyMMdd').format(date ?? DateTime.now());
-
-  String _serial(String distributorCode, String date, int counter) =>
-      'DWK-$distributorCode-$date-${counter.toString().padLeft(4, '0')}';
-
-  String normalizeDigits(String input) {
-    const arabic = ['٠', '١', '٢', '٣', '٤', '٥', '٦', '٧', '٨', '٩'];
-    const english = ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9'];
-    for (int i = 0; i < arabic.length; i++) {
-      input = input.replaceAll(arabic[i], english[i]);
-    }
-    return input.replaceAll(' ', '').trim();
+  String _dateKey(DateTime date) {
+    final y = date.year.toString().padLeft(4, '0');
+    final m = date.month.toString().padLeft(2, '0');
+    final d = date.day.toString().padLeft(2, '0');
+    return '$y$m$d';
   }
 
-  Future<List<Receipt>> getReceipts() async {
-    final db = await _helper.database;
-    final rows = await db.query('receipts', orderBy: 'id DESC');
-    return rows.map(Receipt.fromDatabase).toList();
-  }
-
-  Future<String> previewNextReceiptSerial(String distributorCode, ReceiptStatus status) async {
-    final now = DateTime.now();
-    final today = _dateKey(now);
-    if (status == ReceiptStatus.draft) {
-      return 'DRAFT-$distributorCode-${now.microsecondsSinceEpoch}';
-    }
-
-    final db = await _helper.database;
-    final rows = await db.query(
+  Future<String> _nextReceiptNumber(Transaction txn, String date) async {
+    final rows = await txn.query(
       'daily_sequences',
-      columns: ['last_number'],
       where: 'distributor_code = ? AND shift_date = ?',
-      whereArgs: [distributorCode, today],
+      whereArgs: [distributorCode, date],
       limit: 1,
     );
 
-    final last = rows.isEmpty ? 0 : (rows.first['last_number'] as int);
-    return _serial(distributorCode, today, last + 1);
+    int next;
+    if (rows.isEmpty) {
+      next = 1;
+      await txn.insert('daily_sequences', {
+        'distributor_code': distributorCode,
+        'shift_date': date,
+        'last_number': next,
+      });
+    } else {
+      next = (rows.first['last_number'] as int) + 1;
+      await txn.update(
+        'daily_sequences',
+        {'last_number': next},
+        where: 'distributor_code = ? AND shift_date = ?',
+        whereArgs: [distributorCode, date],
+      );
+    }
+
+    return 'DWK-$distributorCode-$date-${next.toString().padLeft(4, '0')}';
   }
 
-  Future<Receipt> issueAndSaveReceipt({
-    required String distributorCode,
-    required String customerCode,
-    required String customerName,
-    required double amount,
-    required CurrencyType currency,
-    required String method,
-    String? network,
-    String? transferRef,
-    required String note,
-    required ReceiptStatus status,
-    String? fixedDraftNumber,
-  }) async {
-    if (distributorCode.trim().isEmpty) throw ArgumentError('كود الموزع مطلوب.');
-    if (customerCode.trim().isEmpty) throw ArgumentError('بيانات العميل غير مكتملة.');
-    if (!amount.isFinite || amount <= 0) throw ArgumentError('مبلغ السند غير صحيح.');
-    if ((amount * 100).roundToDouble() / 100 != amount) {
-      throw ArgumentError('المبلغ لا يمكن أن يحتوي على أكثر من خانتين عشريتين.');
-    }
-    if (method != 'نقداً' && method != 'حوالة') throw ArgumentError('طريقة القبض غير صحيحة.');
-
-    final cleanRef = transferRef != null ? normalizeDigits(transferRef) : null;
-    if (method == 'حوالة' && (cleanRef == null || cleanRef.isEmpty) && status != ReceiptStatus.draft) {
-      throw ArgumentError('رقم إشعار الحوالة مطلوب.');
-    }
-
+  Future<void> saveCustomer(CustomerRecord customer) async {
     final db = await _helper.database;
-
-    try {
-      return await db.transaction((txn) async {
-        final customer = await txn.query(
-          'customers',
-          columns: ['code'],
-          where: 'code = ?',
-          whereArgs: [customerCode],
-          limit: 1,
-        );
-
-        if (customer.isEmpty) {
-          throw StateError('العميل غير موجود في قاعدة البيانات المحلية: $customerCode');
-        }
-
-        final now = DateTime.now();
-        final date = _dateKey(now);
-        String receiptNumber;
-
-        if (status == ReceiptStatus.draft) {
-          receiptNumber = fixedDraftNumber ?? 'DRAFT-$distributorCode-${now.microsecondsSinceEpoch}';
-        } else {
-          final sequenceRows = await txn.query(
-            'daily_sequences',
-            columns: ['last_number'],
-            where: 'distributor_code = ? AND shift_date = ?',
-            whereArgs: [distributorCode, date],
-            limit: 1,
-          );
-
-          final lastNumber = sequenceRows.isEmpty ? 0 : (sequenceRows.first['last_number'] as int);
-          final nextNumber = lastNumber + 1;
-          receiptNumber = _serial(distributorCode, date, nextNumber);
-
-          if (sequenceRows.isEmpty) {
-            await txn.insert('daily_sequences', {
-              'distributor_code': distributorCode,
-              'shift_date': date,
-              'last_number': nextNumber,
-            });
-          } else {
-            await txn.update(
-              'daily_sequences',
-              {'last_number': nextNumber},
-              where: 'distributor_code = ? AND shift_date = ?',
-              whereArgs: [distributorCode, date],
-            );
-          }
-        }
-
-        final receipt = Receipt(
-          number: receiptNumber,
-          customerCode: customerCode,
-          customerName: customerName,
-          amount: amount,
-          currency: currency,
-          method: method,
-          network: method == 'حوالة' ? network : null,
-          transferRef: method == 'حوالة' ? cleanRef : null,
-          note: note.trim(),
-          status: status,
-          createdAt: now,
-        );
-
-        await txn.insert(
-          'receipts',
-          {
-            'number': receipt.number,
-            'distributor_code': distributorCode,
-            'customer_code': receipt.customerCode,
-            'customer_name': receipt.customerName,
-            'amount': receipt.amount,
-            'currency': receipt.currency.name,
-            'method': receipt.method,
-            'network': receipt.network,
-            'transfer_ref': receipt.transferRef,
-            'note': receipt.note,
-            'status': receipt.status.name,
-            'created_at': receipt.createdAt.toIso8601String(),
-            'shift_date': date,
-            'sync_status': 'pending',
-            'synced_at': null,
-          },
-          conflictAlgorithm: ConflictAlgorithm.abort,
-        );
-
-        return receipt;
-      });
-    } on DatabaseException catch (e) {
-      final err = e.toString();
-      if (e.isUniqueConstraintError() || err.contains('UNIQUE constraint failed')) {
-        if (err.contains('receipts.transfer_ref') || err.contains('receipts.network')) {
-          throw ReceiptPersistenceException('رقم إشعار الحوالة ($cleanRef) مسجل مسبقاً لشبكة ($network).');
-        }
-        throw ReceiptPersistenceException('رقم السند مكرر في قاعدة البيانات.');
-      }
-      rethrow;
-    }
+    await db.insert(
+      'customers',
+      customer.toMap(),
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
   }
 
   Future<void> saveCustomers(List<CustomerRecord> customers) async {
@@ -244,14 +191,134 @@ class ReceiptRepository {
       for (final customer in customers) {
         await txn.insert(
           'customers',
-          {
-            ...customer,
-            'updated_at': DateTime.now().toIso8601String(),
-          },
+          customer.toMap(),
           conflictAlgorithm: ConflictAlgorithm.replace,
         );
       }
     });
+  }
+
+  Future<List<CustomerRecord>> getCustomers({String search = ''}) async {
+    final db = await _helper.database;
+    final term = search.trim();
+
+    final rows = await db.query(
+      'customers',
+      where: term.isEmpty ? null : 'name LIKE ? OR code LIKE ? OR phone LIKE ?',
+      whereArgs: term.isEmpty ? null : ['%$term%', '%$term%', '%$term%'],
+      orderBy: 'name COLLATE NOCASE ASC',
+    );
+
+    return rows.map(CustomerRecord.fromMap).toList();
+  }
+
+  Future<Receipt> issueAndSaveReceipt({
+    required String customerCode,
+    required double amount,
+    required CurrencyType currency,
+    required String method,
+    String? network,
+    String? transferRef,
+    String? note,
+  }) async {
+    if (!amount.isFinite || amount <= 0) {
+      throw Exception('أدخل مبلغاً صحيحاً أكبر من صفر');
+    }
+
+    final db = await _helper.database;
+    final now = DateTime.now();
+    final date = _dateKey(now);
+
+    return db.transaction((txn) async {
+      final customerRows = await txn.query(
+        'customers',
+        where: 'code = ?',
+        whereArgs: [customerCode],
+        limit: 1,
+      );
+
+      if (customerRows.isEmpty) {
+        throw Exception('العميل غير موجود');
+      }
+
+      final customer = CustomerRecord.fromMap(customerRows.first);
+      final number = await _nextReceiptNumber(txn, date);
+
+      final receipt = Receipt(
+        number: number,
+        distributorCode: distributorCode,
+        customerCode: customer.code,
+        customerName: customer.name,
+        amount: amount,
+        currency: currency,
+        method: method,
+        network: network?.trim(),
+        transferRef: transferRef?.trim(),
+        note: note?.trim(),
+        status: ReceiptStatus.pending,
+        createdAt: now,
+        shiftDate: date,
+        syncStatus: 'pending',
+      );
+
+      final id = await txn.insert('receipts', receipt.toMap());
+
+      return Receipt(
+        id: id,
+        number: receipt.number,
+        distributorCode: receipt.distributorCode,
+        customerCode: receipt.customerCode,
+        customerName: receipt.customerName,
+        amount: receipt.amount,
+        currency: receipt.currency,
+        method: receipt.method,
+        network: receipt.network,
+        transferRef: receipt.transferRef,
+        note: receipt.note,
+        status: receipt.status,
+        createdAt: receipt.createdAt,
+        shiftDate: receipt.shiftDate,
+        syncStatus: receipt.syncStatus,
+      );
+    });
+  }
+
+  Future<List<Receipt>> getReceipts({String? customerCode, int limit = 500}) async {
+    final db = await _helper.database;
+    final rows = await db.query(
+      'receipts',
+      where: customerCode == null ? null : 'customer_code = ?',
+      whereArgs: customerCode == null ? null : [customerCode],
+      orderBy: 'id DESC',
+      limit: limit,
+    );
+    return rows.map(Receipt.fromMap).toList();
+  }
+
+  Future> getLocalTotals() async {
+    final db = await _helper.database;
+    final rows = await db.rawQuery('''
+      SELECT currency, SUM(amount) AS total
+      FROM receipts
+      WHERE status != 'draft'
+      GROUP BY currency
+    ''');
+
+    final totals = <String, double>{'yer': 0, 'sar': 0, 'usd': 0};
+    for (final row in rows) {
+      totals[row['currency'] as String] = (row['total'] as num?)?.toDouble() ?? 0;
+    }
+    return totals;
+  }
+
+  Future<int> getPendingCount() async {
+    final db = await _helper.database;
+    final result = await db.rawQuery('''
+      SELECT COUNT(*) AS total
+      FROM receipts
+      WHERE sync_status IN ('pending', 'failed') AND status != 'draft'
+    ''');
+    return (result.first['total'] as num).toInt();
   }
 
   Future<void> close() => _helper.close();
