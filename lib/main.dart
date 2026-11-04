@@ -78,31 +78,12 @@ class ReceiptItem {
     required this.status,
     required this.createdAt,
   });
-
-  ReceiptItem copyWith({ReceiptStatus? status}) {
-    return ReceiptItem(
-      receiptNumber: receiptNumber,
-      customer: customer,
-      amount: amount,
-      paymentType: paymentType,
-      network: network,
-      transferNumber: transferNumber,
-      notes: notes,
-      status: status ?? this.status,
-      createdAt: createdAt,
-    );
-  }
 }
 
 // ============================================================
-// DATA STORE & REPOSITORY CONTRACT (OFFLINE-FIRST)
+// DATA STORE (OFFLINE-FIRST)
 // ============================================================
-abstract class IReceiptRepository {
-  Future<List<ReceiptItem>> getReceipts();
-  Future<ReceiptItem> saveReceipt(ReceiptItem receipt);
-}
-
-class LocalReceiptStore implements IReceiptRepository {
+class LocalReceiptStore {
   static final LocalReceiptStore _instance = LocalReceiptStore._internal();
   factory LocalReceiptStore() => _instance;
   LocalReceiptStore._internal();
@@ -121,20 +102,14 @@ class LocalReceiptStore implements IReceiptRepository {
       paymentType: PaymentType.cash,
       notes: 'دفعة سداد فاتورة 481',
       status: ReceiptStatus.pending,
-      createdAt: DateTime.now().subtract(const Duration(hours: 2)),
+      createdAt: DateTime.now(),
     ),
   ];
 
-  @override
-  Future<List<ReceiptItem>> getReceipts() async {
-    return List.from(_receipts);
-  }
+  List<ReceiptItem> getReceipts() => List.unmodifiable(_receipts);
 
-  @override
-  Future<ReceiptItem> saveReceipt(ReceiptItem receipt) async {
-    await Future.delayed(const Duration(milliseconds: 400));
-    _receipts.insert(0, receipt);
-    return receipt;
+  void addReceipt(ReceiptItem item) {
+    _receipts.insert(0, item);
   }
 }
 
@@ -188,7 +163,7 @@ class _LoginScreenState extends State<LoginScreen> {
     }
 
     setState(() => _loading = true);
-    Future.delayed(const Duration(milliseconds: 600), () {
+    Future.delayed(const Duration(milliseconds: 500), () {
       if (!mounted) return;
       setState(() => _loading = false);
       Navigator.pushReplacement(
@@ -274,7 +249,7 @@ class _LoginScreenState extends State<LoginScreen> {
                 ),
                 const SizedBox(height: 20),
                 const Text(
-                  'الإصدار التجريبي 1.0.0 — يعمل بنمط Offline-First',
+                  'المرحلة 1: تجربة الواجهة ونظام السندات دون اتصال',
                   textAlign: TextAlign.center,
                   style: TextStyle(color: DawacomTheme.muted, fontSize: 11),
                 ),
@@ -480,7 +455,7 @@ class _CustomersListScreenState extends State<CustomersListScreen> {
 }
 
 // ============================================================
-// 3. RECEIPT ENTRY SCREEN (WITH STRICT STATUSES & TAFQEET)
+// 3. RECEIPT ENTRY SCREEN
 // ============================================================
 class ReceiptEntryScreen extends StatefulWidget {
   final Customer customer;
@@ -570,7 +545,7 @@ class _ReceiptEntryScreenState extends State<ReceiptEntryScreen> {
     return 'فقط ${parts.join(' و')} ريال يمني لا غير';
   }
 
-  void _submitReceipt(ReceiptStatus targetStatus) async {
+  void _submitReceipt(ReceiptStatus targetStatus) {
     if (targetStatus != ReceiptStatus.draft) {
       if (!_formKey.currentState!.validate()) return;
     } else {
@@ -596,9 +571,8 @@ class _ReceiptEntryScreenState extends State<ReceiptEntryScreen> {
       createdAt: DateTime.now(),
     );
 
-    await LocalReceiptStore().saveReceipt(newReceipt);
+    LocalReceiptStore().addReceipt(newReceipt);
 
-    if (!mounted) return;
     setState(() => _saving = false);
 
     showDialog(
@@ -625,7 +599,7 @@ class _ReceiptEntryScreenState extends State<ReceiptEntryScreen> {
           content: Text(
             targetStatus == ReceiptStatus.draft
                 ? 'تم حفظ السند كمسودة محلياً في هاتفك. يمكنك تعديله واعتماده لاحقاً.'
-                : 'تم اعتماد السند رقم ${newReceipt.receiptNumber}.\nحالة السند الحالية: بانتظار الترحيل.\nلن يُعد مرحلاً في حساب العميل حتى يتم تأكيد المزامنة مع Life Ex Pro في المرحلة 2.',
+                : 'تم اعتماد السند رقم ${newReceipt.receiptNumber}.\nحالة السند: بانتظار الترحيل.\nلن يُسجل كمرحل حتى يتم الربط الفعلي مع Life Ex Pro في المرحلة 2.',
             style: const TextStyle(color: DawacomTheme.muted, fontSize: 13, height: 1.5),
           ),
           actions: [
@@ -824,14 +798,20 @@ class _ReceiptEntryScreenState extends State<ReceiptEntryScreen> {
             children: [
               _amountQuickChip('+50,000', 50000),
               _amountQuickChip('+100,000', 100000),
-              ActionChip(
-                label: const Text('كامل الرصيد'),
-                backgroundColor: DawacomTheme.gold,
-                labelStyle: const TextStyle(color: DawacomTheme.background, fontWeight: FontWeight.bold, fontSize: 11),
-                onPressed: () {
+              InkWell(
+                onTap: () {
                   _amountController.text = widget.customer.currentBalance.toStringAsFixed(0);
                   setState(() {});
                 },
+                borderRadius: BorderRadius.circular(8),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  decoration: BoxDecoration(
+                    color: DawacomTheme.gold,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: const Text('كامل الرصيد', style: TextStyle(color: DawacomTheme.background, fontWeight: FontWeight.bold, fontSize: 11)),
+                ),
               ),
             ],
           ),
@@ -841,16 +821,22 @@ class _ReceiptEntryScreenState extends State<ReceiptEntryScreen> {
   }
 
   Widget _amountQuickChip(String label, double val) {
-    return ActionChip(
-      label: Text(label),
-      backgroundColor: DawacomTheme.surface2,
-      side: const BorderSide(color: DawacomTheme.border),
-      labelStyle: const TextStyle(color: DawacomTheme.white, fontSize: 11),
-      onPressed: () {
+    return InkWell(
+      onTap: () {
         final current = double.tryParse(_amountController.text) ?? 0;
         _amountController.text = (current + val).toStringAsFixed(0);
         setState(() {});
       },
+      borderRadius: BorderRadius.circular(8),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        decoration: BoxDecoration(
+          color: DawacomTheme.surface2,
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: DawacomTheme.border),
+        ),
+        child: Text(label, style: const TextStyle(color: DawacomTheme.white, fontSize: 11)),
+      ),
     );
   }
 
@@ -936,7 +922,7 @@ class _ReceiptEntryScreenState extends State<ReceiptEntryScreen> {
 }
 
 // ============================================================
-// 4. RECEIPTS LOG SCREEN (STATUS FILTERING)
+// 4. RECEIPTS LOG SCREEN
 // ============================================================
 class ReceiptsLogScreen extends StatefulWidget {
   const ReceiptsLogScreen({super.key});
@@ -952,6 +938,11 @@ class _ReceiptsLogScreenState extends State<ReceiptsLogScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final all = LocalReceiptStore().getReceipts();
+    final filtered = _selectedStatusFilter == null
+        ? all
+        : all.where((r) => r.status == _selectedStatusFilter).toList();
+
     return Scaffold(
       appBar: AppBar(
         backgroundColor: DawacomTheme.background,
@@ -959,35 +950,21 @@ class _ReceiptsLogScreenState extends State<ReceiptsLogScreen> {
         title: const Text('سجل سندات التحصيل', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 17, color: DawacomTheme.white)),
         centerTitle: true,
       ),
-      body: FutureBuilder<List<ReceiptItem>>(
-        future: LocalReceiptStore().getReceipts(),
-        builder: (ctx, snapshot) {
-          if (!snapshot.hasData) {
-            return const Center(child: CircularProgressIndicator(color: DawacomTheme.gold));
-          }
-
-          final all = snapshot.data!;
-          final filtered = _selectedStatusFilter == null
-              ? all
-              : all.where((r) => r.status == _selectedStatusFilter).toList();
-
-          return Column(
-            children: [
-              _buildFilterChips(),
-              Expanded(
-                child: filtered.isEmpty
-                    ? const Center(
-                        child: Text('لا توجد سندات في هذا التصنيف', style: TextStyle(color: DawacomTheme.muted)),
-                      )
-                    : ListView.builder(
-                        padding: const EdgeInsets.all(16),
-                        itemCount: filtered.length,
-                        itemBuilder: (ctx, idx) => _buildReceiptCard(filtered[idx]),
-                      ),
-              ),
-            ],
-          );
-        },
+      body: Column(
+        children: [
+          _buildFilterChips(),
+          Expanded(
+            child: filtered.isEmpty
+                ? const Center(
+                    child: Text('لا توجد سندات في هذا التصنيف', style: TextStyle(color: DawacomTheme.muted)),
+                  )
+                : ListView.builder(
+                    padding: const EdgeInsets.all(16),
+                    itemCount: filtered.length,
+                    itemBuilder: (ctx, idx) => _buildReceiptCard(filtered[idx]),
+                  ),
+          ),
+        ],
       ),
     );
   }
@@ -998,26 +975,38 @@ class _ReceiptsLogScreenState extends State<ReceiptsLogScreen> {
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
       child: Row(
         children: [
-          _filterChip('الكل', null),
-          _filterChip('بانتظار الترحيل', ReceiptStatus.pending),
-          _filterChip('مسودة', ReceiptStatus.draft),
-          _filterChip('مرحّل', ReceiptStatus.posted),
+          _filterBadge('الكل', null),
+          _filterBadge('بانتظار الترحيل', ReceiptStatus.pending),
+          _filterBadge('مسودة', ReceiptStatus.draft),
+          _filterBadge('مرحّل', ReceiptStatus.posted),
         ],
       ),
     );
   }
 
-  Widget _filterChip(String title, ReceiptStatus? status) {
+  Widget _filterBadge(String title, ReceiptStatus? status) {
     final active = _selectedStatusFilter == status;
     return Padding(
       padding: const EdgeInsets.only(left: 8.0),
-      child: ChoiceChip(
-        label: Text(title),
-        selected: active,
-        selectedColor: DawacomTheme.gold,
-        backgroundColor: DawacomTheme.surface,
-        labelStyle: TextStyle(color: active ? DawacomTheme.background : DawacomTheme.white, fontSize: 12, fontWeight: FontWeight.bold),
-        onSelected: (_) => setState(() => _selectedStatusFilter = status),
+      child: InkWell(
+        onTap: () => setState(() => _selectedStatusFilter = status),
+        borderRadius: BorderRadius.circular(10),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+          decoration: BoxDecoration(
+            color: active ? DawacomTheme.gold : DawacomTheme.surface,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: active ? DawacomTheme.gold : DawacomTheme.border),
+          ),
+          child: Text(
+            title,
+            style: TextStyle(
+              color: active ? DawacomTheme.background : DawacomTheme.white,
+              fontSize: 12,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+        ),
       ),
     );
   }
