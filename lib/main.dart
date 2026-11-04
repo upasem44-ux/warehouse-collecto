@@ -1353,12 +1353,12 @@ class CashDrawerPage extends StatelessWidget {
         .where((r) => r.currency == CurrencyType.yer && r.method == 'نقداً')
         .fold(0.0, (s, r) => s + r.amount);
     final cashSAR = todayReceipts
-          final cashSAR = todayReceipts
         .where((r) => r.currency == CurrencyType.sar && r.method == 'نقداً')
         .fold(0.0, (s, r) => s + r.amount);
     final cashUSD = todayReceipts
         .where((r) => r.currency == CurrencyType.usd && r.method == 'نقداً')
         .fold(0.0, (s, r) => s + r.amount);
+
 
     final transYER = todayReceipts
         .where((r) => r.currency == CurrencyType.yer && r.method == 'حوالة')
