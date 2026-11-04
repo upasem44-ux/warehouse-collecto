@@ -1,13 +1,21 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:intl/intl.dart' hide TextDirection;
+import 'package:intl/intl.dart';
 import 'package:sqflite/sqflite.dart';
 import 'package:path/path.dart' as p;
 
-void main() async {
+// ============================================================
+// 1. تشغيل التطبيق
+// ============================================================
+
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   runApp(const DawacomCollectorApp());
 }
+
+// ============================================================
+// 2. الهوية البصرية
+// ============================================================
 
 class AppColors {
   static const navy = Color(0xFF0B1F3A);
@@ -20,15 +28,19 @@ class AppColors {
   static const green = Color(0xFF15966B);
   static const red = Color(0xFFD94B4B);
   static const border = Color(0xFFE7EBF1);
+  static const orange = Color(0xFFD18B22);
 }
 
 enum CurrencyType { yer, sar, usd }
+
 enum ReceiptStatus { draft, pending, posted }
 
-String money(num value) => NumberFormat('#,##0.##', 'en_US').format(value);
+String money(num value) {
+  return NumberFormat('#,##0.##', 'en_US').format(value);
+}
 
-String currencyShort(CurrencyType c) {
-  switch (c) {
+String currencyShort(CurrencyType currency) {
+  switch (currency) {
     case CurrencyType.yer:
       return 'ر.ي';
     case CurrencyType.sar:
@@ -38,16 +50,35 @@ String currencyShort(CurrencyType c) {
   }
 }
 
-String statusArabic(ReceiptStatus s) {
-  switch (s) {
+String currencyName(CurrencyType currency) {
+  switch (currency) {
+    case CurrencyType.yer:
+      return 'ريال يمني';
+    case CurrencyType.sar:
+      return 'ريال سعودي';
+    case CurrencyType.usd:
+      return 'دولار أمريكي';
+  }
+}
+
+String statusArabic(ReceiptStatus status) {
+  switch (status) {
     case ReceiptStatus.draft:
       return 'مسودة';
     case ReceiptStatus.pending:
       return 'بانتظار المزامنة';
     case ReceiptStatus.posted:
-      return 'مرحّل';
+      return 'مرحّل مركزياً';
   }
 }
+
+String formatDate(DateTime date) {
+  return DateFormat('yyyy/MM/dd - hh:mm a').format(date);
+}
+
+// ============================================================
+// 3. نماذج البيانات
+// ============================================================
 
 class CustomerRecord {
   final String code;
@@ -80,21 +111,24 @@ class CustomerRecord {
     );
   }
 
-  Map<String, Object?> toMap() => {
-        'code': code.trim(),
-        'name': name.trim(),
-        'area': area.trim(),
-        'phone': phone.trim(),
-        'balance_yer': balanceYer,
-        'balance_sar': balanceSar,
-        'balance_usd': balanceUsd,
-        'updated_at': DateTime.now().toIso8601String(),
-      };
+  Map<String, Object?> toMap() {
+    return {
+      'code': code.trim(),
+      'name': name.trim(),
+      'area': area.trim(),
+      'phone': phone.trim(),
+      'balance_yer': balanceYer,
+      'balance_sar': balanceSar,
+      'balance_usd': balanceUsd,
+      'updated_at': DateTime.now().toIso8601String(),
+    };
+  }
 }
 
 class ReceiptModel {
   final int? id;
   final String number;
+  final String distributorCode;
   final String customerCode;
   final String customerName;
   final double amount;
@@ -105,10 +139,12 @@ class ReceiptModel {
   final String? note;
   final ReceiptStatus status;
   final DateTime createdAt;
+  final String syncStatus;
 
   const ReceiptModel({
     this.id,
     required this.number,
+    required this.distributorCode,
     required this.customerCode,
     required this.customerName,
     required this.amount,
@@ -119,12 +155,14 @@ class ReceiptModel {
     this.note,
     required this.status,
     required this.createdAt,
+    this.syncStatus = 'pending',
   });
 
   factory ReceiptModel.fromMap(Map<String, Object?> map) {
     return ReceiptModel(
       id: map['id'] as int?,
       number: map['number'] as String,
+      distributorCode: map['distributor_code'] as String? ?? '',
       customerCode: map['customer_code'] as String? ?? '',
       customerName: map['customer_name'] as String,
       amount: (map['amount'] as num).toDouble(),
@@ -140,41 +178,69 @@ class ReceiptModel {
         (e) => e.name == map['status'],
         orElse: () => ReceiptStatus.pending,
       ),
-      createdAt: DateTime.tryParse(map['created_at'] as String? ?? '') ??
+      createdAt: DateTime.tryParse(
+            map['created_at'] as String? ?? '',
+          ) ??
           DateTime.now(),
+      syncStatus: map['sync_status'] as String? ?? 'pending',
     );
   }
 }
 
+// ============================================================
+// 4. قاعدة البيانات SQLite
+// ============================================================
+
 class LocalDatabase {
-  static final LocalDatabase instance = LocalDatabase._();
   LocalDatabase._();
+
+  static final LocalDatabase instance = LocalDatabase._();
+
   Database? _db;
 
-  Future<Database> get database async => _db ??= await _initDb();
+  static const String distributorCode = '1001';
+
+  Future<Database> get database async {
+    if (_db != null) return _db!;
+    _db = await _initDb();
+    return _db!;
+  }
 
   Future<Database> _initDb() async {
-    final path = p.join(await getDatabasesPath(), 'dawacom_collector_v4.db');
+    final databasePath = await getDatabasesPath();
+
+    final path = p.join(
+      databasePath,
+      'dawacom_collector_v4.db',
+    );
+
     return openDatabase(
       path,
       version: 1,
-      onCreate: (db, v) async {
+      onConfigure: (db) async {
+        await db.execute('PRAGMA foreign_keys = ON');
+        await db.execute('PRAGMA journal_mode = WAL');
+        await db.execute('PRAGMA synchronous = FULL');
+      },
+      onCreate: (db, version) async {
         await db.execute('''
           CREATE TABLE customers (
             code TEXT PRIMARY KEY,
             name TEXT NOT NULL,
             area TEXT DEFAULT '',
             phone TEXT DEFAULT '',
-            balance_yer REAL DEFAULT 0,
-            balance_sar REAL DEFAULT 0,
-            balance_usd REAL DEFAULT 0,
-            updated_at TEXT
+            balance_yer REAL NOT NULL DEFAULT 0,
+            balance_sar REAL NOT NULL DEFAULT 0,
+            balance_usd REAL NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL
           )
         ''');
+
         await db.execute('''
           CREATE TABLE receipts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            number TEXT UNIQUE NOT NULL,
+            number TEXT NOT NULL UNIQUE,
+            distributor_code TEXT NOT NULL,
             customer_code TEXT NOT NULL,
             customer_name TEXT NOT NULL,
             amount REAL NOT NULL,
@@ -183,85 +249,171 @@ class LocalDatabase {
             network TEXT,
             transfer_ref TEXT,
             note TEXT,
-            status TEXT NOT NULL,
-            created_at TEXT NOT NULL
+            status TEXT NOT NULL DEFAULT 'pending',
+            created_at TEXT NOT NULL,
+            shift_date TEXT NOT NULL,
+            sync_status TEXT NOT NULL DEFAULT 'pending',
+            synced_at TEXT,
+            FOREIGN KEY(customer_code)
+              REFERENCES customers(code)
+              ON UPDATE CASCADE
+              ON DELETE RESTRICT
           )
         ''');
 
-        final now = DateTime.now().toIso8601String();
-        await db.insert('customers', {
-          'code': 'C-101',
-          'name': 'صيدلية الأمل الحديثة',
-          'area': 'صنعاء - التحرير',
-          'phone': '777111222',
-          'balance_yer': 850000.0,
-          'balance_sar': 2400.0,
-          'balance_usd': 350.0,
-          'updated_at': now,
-        });
-        await db.insert('customers', {
-          'code': 'C-102',
-          'name': 'صيدلية النور المركزية',
-          'area': 'صنعاء - حدة',
-          'phone': '777333444',
-          'balance_yer': 420000.0,
-          'balance_sar': 0.0,
-          'balance_usd': 0.0,
-          'updated_at': now,
-        });
+        await db.execute('''
+          CREATE TABLE daily_sequences (
+            distributor_code TEXT NOT NULL,
+            shift_date TEXT NOT NULL,
+            last_number INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY(distributor_code, shift_date)
+          )
+        ''');
+
+        await _createIndexes(db);
       },
     );
   }
 
-  Future<List<CustomerRecord>> getCustomers({String search = ''}) async {
+  Future<void> _createIndexes(DatabaseExecutor db) async {
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_receipts_customer
+      ON receipts(customer_code)
+    ''');
+
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_receipts_date
+      ON receipts(shift_date)
+    ''');
+
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_receipts_sync
+      ON receipts(sync_status)
+    ''');
+
+    await db.execute('''
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_transfer_ref
+      ON receipts(network, transfer_ref)
+      WHERE method = 'حوالة'
+        AND transfer_ref IS NOT NULL
+        AND transfer_ref != ''
+        AND status != 'draft'
+    ''');
+  }
+
+  // ----------------------------------------------------------
+  // العملاء
+  // ----------------------------------------------------------
+
+  Future<List<CustomerRecord>> getCustomers({
+    String search = '',
+  }) async {
     final db = await database;
     final term = search.trim();
+
     final rows = await db.query(
       'customers',
-      where: term.isEmpty ? null : 'name LIKE ? OR code LIKE ? OR phone LIKE ?',
-      whereArgs: term.isEmpty ? null : ['%$term%', '%$term%', '%$term%'],
-      orderBy: 'name ASC',
+      where: term.isEmpty
+          ? null
+          : 'name LIKE ? OR code LIKE ? OR phone LIKE ?',
+      whereArgs: term.isEmpty
+          ? null
+          : ['%$term%', '%$term%', '%$term%'],
+      orderBy: 'name COLLATE NOCASE ASC',
     );
+
     return rows.map(CustomerRecord.fromMap).toList();
+  }
+
+  Future<CustomerRecord?> getCustomer(String code) async {
+    final db = await database;
+
+    final rows = await db.query(
+      'customers',
+      where: 'code = ?',
+      whereArgs: [code],
+      limit: 1,
+    );
+
+    if (rows.isEmpty) return null;
+
+    return CustomerRecord.fromMap(rows.first);
   }
 
   Future<void> saveCustomer(CustomerRecord customer) async {
     final db = await database;
-    await db.insert(
-      'customers',
-      customer.toMap(),
-      conflictAlgorithm: ConflictAlgorithm.replace,
-    );
-  }
 
-  Future<List<ReceiptModel>> getReceipts({String? customerCode}) async {
-    final db = await database;
-    final rows = await db.query(
-      'receipts',
-      where: customerCode == null ? null : 'customer_code = ?',
-      whereArgs: customerCode == null ? null : [customerCode],
-      orderBy: 'id DESC',
-    );
-    return rows.map(ReceiptModel.fromMap).toList();
-  }
+    await db.transaction((txn) async {
+      final existing = await txn.query(
+        'customers',
+        columns: ['code'],
+        where: 'code = ?',
+        whereArgs: [customer.code.trim()],
+        limit: 1,
+      );
 
-  Future> getLocalTotals() async {
-    final db = await database;
-    final rows = await db.rawQuery('''
-      SELECT currency, SUM(amount) AS total
-      FROM receipts
-      WHERE status != 'draft'
-      GROUP BY currency
-    ''');
-    final totals = <String, double>{'yer': 0, 'sar': 0, 'usd': 0};
-    for (final row in rows) {
-      final key = row['currency'] as String?;
-      if (key != null) {
-        totals[key] = (row['total'] as num?)?.toDouble() ?? 0;
+      if (existing.isEmpty) {
+        await txn.insert(
+          'customers',
+          customer.toMap(),
+        );
+      } else {
+        await txn.update(
+          'customers',
+          customer.toMap(),
+          where: 'code = ?',
+          whereArgs: [customer.code.trim()],
+        );
       }
-    }
-    return totals;
+    });
   }
+
+  // ----------------------------------------------------------
+  // ترقيم السندات
+  // ----------------------------------------------------------
+
+  String _dateKey(DateTime date) {
+    return DateFormat('yyyyMMdd').format(date);
+  }
+
+  Future<String> _nextReceiptNumber(
+    Transaction txn,
+    String date,
+  ) async {
+    final rows = await txn.query(
+      'daily_sequences',
+      where: 'distributor_code = ? AND shift_date = ?',
+      whereArgs: [distributorCode, date],
+      limit: 1,
+    );
+
+    int next;
+
+    if (rows.isEmpty) {
+      next = 1;
+
+      await txn.insert('daily_sequences', {
+        'distributor_code': distributorCode,
+        'shift_date': date,
+        'last_number': next,
+      });
+    } else {
+      next = (rows.first['last_number'] as int) + 1;
+
+      await txn.update(
+        'daily_sequences',
+        {'last_number': next},
+        where: 'distributor_code = ? AND shift_date = ?',
+        whereArgs: [distributorCode, date],
+      );
+    }
+
+    return 'DWK-$distributorCode-$date-${next.toString().padLeft(4, '0')}';
+  }
+
+  // ----------------------------------------------------------
+  // إصدار سند قبض
+  // ----------------------------------------------------------
 
   Future<ReceiptModel> saveReceipt({
     required CustomerRecord customer,
@@ -272,43 +424,181 @@ class LocalDatabase {
     String? transferRef,
     String? note,
   }) async {
+    if (!amount.isFinite || amount <= 0) {
+      throw Exception('المبلغ غير صحيح');
+    }
+
+    if ((amount * 100 - (amount * 100).round()).abs() > 0.000001) {
+      throw Exception('المبلغ لا يقبل أكثر من منزلتين عشريتين');
+    }
+
+    if (method == 'حوالة') {
+      if (network == null || network.trim().isEmpty) {
+        throw Exception('حدد شبكة الحوالة');
+      }
+
+      if (transferRef == null || transferRef.trim().isEmpty) {
+        throw Exception('رقم الحوالة مطلوب');
+      }
+    }
+
     final db = await database;
     final now = DateTime.now();
-    final seq = (now.millisecondsSinceEpoch % 10000).toString().padLeft(4, '0');
-    final number = 'DWK-1001-${DateFormat('yyyyMMdd').format(now)}-$seq';
+    final date = _dateKey(now);
 
-    final map = {
-      'number': number,
-      'customer_code': customer.code,
-      'customer_name': customer.name,
-      'amount': amount,
-      'currency': currency.name,
-      'method': method,
-      'network': network,
-      'transfer_ref': transferRef,
-      'note': note,
-      'status': ReceiptStatus.pending.name,
-      'created_at': now.toIso8601String(),
+    return db.transaction((txn) async {
+      final customerRows = await txn.query(
+        'customers',
+        where: 'code = ?',
+        whereArgs: [customer.code],
+        limit: 1,
+      );
+
+      if (customerRows.isEmpty) {
+        throw Exception('العميل غير موجود');
+      }
+
+      final savedCustomer =
+          CustomerRecord.fromMap(customerRows.first);
+
+      final number = await _nextReceiptNumber(txn, date);
+
+      final map = {
+        'number': number,
+        'distributor_code': distributorCode,
+        'customer_code': savedCustomer.code,
+        'customer_name': savedCustomer.name,
+        'amount': amount,
+        'currency': currency.name,
+        'method': method,
+        'network': network?.trim(),
+        'transfer_ref': transferRef?.trim(),
+        'note': note?.trim(),
+        'status': ReceiptStatus.pending.name,
+        'created_at': now.toIso8601String(),
+        'shift_date': date,
+        'sync_status': 'pending',
+        'synced_at': null,
+      };
+
+      final id = await txn.insert('receipts', map);
+
+      return ReceiptModel.fromMap({
+        ...map,
+        'id': id,
+      });
+    });
+  }
+
+  // ----------------------------------------------------------
+  // قراءة السندات
+  // ----------------------------------------------------------
+
+  Future<List<ReceiptModel>> getReceipts({
+    String? customerCode,
+    int limit = 1000,
+  }) async {
+    final db = await database;
+
+    final rows = await db.query(
+      'receipts',
+      where: customerCode == null
+          ? null
+          : 'customer_code = ?',
+      whereArgs: customerCode == null
+          ? null
+          : [customerCode],
+      orderBy: 'id DESC',
+      limit: limit,
+    );
+
+    return rows.map(ReceiptModel.fromMap).toList();
+  }
+
+  Future<List<ReceiptModel>> getPendingReceipts() async {
+    final db = await database;
+
+    final rows = await db.query(
+      'receipts',
+      where: "sync_status IN ('pending', 'failed') AND status != 'draft'",
+      orderBy: 'id ASC',
+    );
+
+    return rows.map(ReceiptModel.fromMap).toList();
+  }
+
+  // ----------------------------------------------------------
+  // الإجماليات
+  // ----------------------------------------------------------
+
+  Future<Map<String, double>> getLocalTotals() async {
+    final db = await database;
+
+    final rows = await db.rawQuery('''
+      SELECT currency, SUM(amount) AS total
+      FROM receipts
+      WHERE status != 'draft'
+      GROUP BY currency
+    ''');
+
+    final totals = <String, double>{
+      'yer': 0,
+      'sar': 0,
+      'usd': 0,
     };
 
-    final id = await db.insert('receipts', map);
-    return ReceiptModel.fromMap({...map, 'id': id});
+    for (final row in rows) {
+      final key = row['currency'] as String?;
+
+      if (key != null) {
+        totals[key] =
+            (row['total'] as num?)?.toDouble() ?? 0;
+      }
+    }
+
+    return totals;
+  }
+
+  Future<int> getPendingCount() async {
+    final db = await database;
+
+    final rows = await db.rawQuery('''
+      SELECT COUNT(*) AS total
+      FROM receipts
+      WHERE sync_status IN ('pending', 'failed')
+        AND status != 'draft'
+    ''');
+
+    return (rows.first['total'] as num).toInt();
   }
 }
 
 final dbRepo = LocalDatabase.instance;
+
+// ============================================================
+// 5. الرسائل العامة
+// ============================================================
+
 final GlobalKey<ScaffoldMessengerState> messengerKey =
     GlobalKey<ScaffoldMessengerState>();
 
-void showMsg(String text, {bool error = false}) {
+void showMsg(
+  String message, {
+  bool error = false,
+}) {
   messengerKey.currentState?.showSnackBar(
     SnackBar(
-      content: Text(text),
-      backgroundColor: error ? AppColors.red : AppColors.navy,
+      content: Text(message),
+      backgroundColor:
+          error ? AppColors.red : AppColors.navy,
       behavior: SnackBarBehavior.floating,
     ),
   );
 }
+
+// ============================================================
+// 6. التطبيق الرئيسي
+// ============================================================
 
 class DawacomCollectorApp extends StatelessWidget {
   const DawacomCollectorApp({super.key});
@@ -339,23 +629,55 @@ class DawacomCollectorApp extends StatelessWidget {
           foregroundColor: AppColors.white,
           elevation: 0,
         ),
+        inputDecorationTheme: InputDecorationTheme(
+          filled: true,
+          fillColor: Colors.white,
+          contentPadding: const EdgeInsets.symmetric(
+            horizontal: 14,
+            vertical: 15,
+          ),
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(13),
+            borderSide: const BorderSide(
+              color: AppColors.border,
+            ),
+          ),
+          enabledBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(13),
+            borderSide: const BorderSide(
+              color: AppColors.border,
+            ),
+          ),
+          focusedBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(13),
+            borderSide: const BorderSide(
+              color: AppColors.gold,
+              width: 1.5,
+            ),
+          ),
+        ),
       ),
       home: const CollectorShell(),
     );
   }
 }
 
+// ============================================================
+// 7. التنقل الرئيسي
+// ============================================================
+
 class CollectorShell extends StatefulWidget {
   const CollectorShell({super.key});
 
   @override
-  State<CollectorShell> createState() => _CollectorShellState();
+  State<CollectorShell> createState() =>
+      _CollectorShellState();
 }
 
 class _CollectorShellState extends State<CollectorShell> {
   int selectedIndex = 0;
 
-  final List<String> titles = const [
+  final titles = const [
     'الرئيسية',
     'العملاء وكشف الحساب',
     'تحصيل جديد',
@@ -366,7 +688,11 @@ class _CollectorShellState extends State<CollectorShell> {
   @override
   Widget build(BuildContext context) {
     final pages = [
-      DashboardPage(onNavigate: (i) => setState(() => selectedIndex = i)),
+      DashboardPage(
+        onNavigate: (index) {
+          setState(() => selectedIndex = index);
+        },
+      ),
       const CustomersPage(),
       const CollectPage(),
       const HistoryPage(),
@@ -380,11 +706,17 @@ class _CollectorShellState extends State<CollectorShell> {
           children: [
             Text(
               titles[selectedIndex],
-              style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+              style: const TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+              ),
             ),
             const Text(
               'محلات دواكم المركزية للأدوية',
-              style: TextStyle(fontSize: 11, color: Color(0xFFD2DCE8)),
+              style: TextStyle(
+                fontSize: 11,
+                color: Color(0xFFD2DCE8),
+              ),
             ),
           ],
         ),
@@ -395,133 +727,407 @@ class _CollectorShellState extends State<CollectorShell> {
           ),
         ],
       ),
-      body: pages[selectedIndex],
+      body: IndexedStack(
+        index: selectedIndex,
+        children: pages,
+      ),
       bottomNavigationBar: NavigationBar(
         selectedIndex: selectedIndex,
-        onDestinationSelected: (i) => setState(() => selectedIndex = i),
+        onDestinationSelected: (index) {
+          setState(() => selectedIndex = index);
+        },
         backgroundColor: Colors.white,
         indicatorColor: AppColors.gold.withOpacity(0.25),
         destinations: const [
-          NavigationDestination(icon: Icon(Icons.dashboard_outlined), label: 'الرئيسية'),
-          NavigationDestination(icon: Icon(Icons.people_outline), label: 'العملاء'),
-          NavigationDestination(icon: Icon(Icons.add_circle_outline), label: 'تحصيل'),
-          NavigationDestination(icon: Icon(Icons.receipt_long_outlined), label: 'السندات'),
-          NavigationDestination(icon: Icon(Icons.account_balance_wallet_outlined), label: 'العهدة'),
+          NavigationDestination(
+            icon: Icon(Icons.dashboard_outlined),
+            selectedIcon: Icon(Icons.dashboard),
+            label: 'الرئيسية',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.people_outline),
+            selectedIcon: Icon(Icons.people),
+            label: 'العملاء',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.add_circle_outline),
+            selectedIcon: Icon(Icons.add_circle),
+            label: 'تحصيل',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.receipt_long_outlined),
+            selectedIcon: Icon(Icons.receipt_long),
+            label: 'السندات',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.account_balance_wallet_outlined),
+            selectedIcon: Icon(Icons.account_balance_wallet),
+            label: 'العهدة',
+          ),
         ],
       ),
     );
   }
 }
 
-class DashboardPage extends StatelessWidget {
-  final ValueChanged<int> onNavigate;
-  const DashboardPage({super.key, required this.onNavigate});
+// ============================================================
+// 8. عناصر واجهة مشتركة
+// ============================================================
+
+class SectionTitle extends StatelessWidget {
+  final String title;
+  final String? subtitle;
+
+  const SectionTitle({
+    super.key,
+    required this.title,
+    this.subtitle,
+  });
 
   @override
   Widget build(BuildContext context) {
-    return FutureBuilder(
-      future: Future.wait([
-        dbRepo.getCustomers(),
-        dbRepo.getReceipts(),
-        dbRepo.getLocalTotals(),
-      ]),
-      builder: (context, snapshot) {
-        if (snapshot.connectionState == ConnectionState.waiting) {
-          return const Center(child: CircularProgressIndicator());
-        }
-        final data = snapshot.data as List?;
-        if (data == null) return const Center(child: Text('خطأ في تحميل البيانات'));
-
-        final customers = data[0] as List<CustomerRecord>;
-        final receipts = data[1] as List<ReceiptModel>;
-        final totals = data[2] as Map<String, double>;
-
-        return ListView(
-          padding: const EdgeInsets.all(16),
-          children: [
-            Container(
-              padding: const EdgeInsets.all(20),
-              decoration: BoxDecoration(
-                gradient: const LinearGradient(
-                  colors: [AppColors.navy, AppColors.navyLight],
-                ),
-                borderRadius: BorderRadius.circular(18),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text('مرحباً بك في محطة التحصيل الميداني',
-                      style: TextStyle(color: Colors.white, fontSize: 17, fontWeight: FontWeight.bold)),
-                  const SizedBox(height: 6),
-                  Text('إجمالي السندات المحفوظة: ${receipts.length} سند',
-                      style: const TextStyle(color: AppColors.gold, fontSize: 13)),
-                  const SizedBox(height: 14),
-                  ElevatedButton.icon(
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: AppColors.gold,
-                      foregroundColor: AppColors.navy,
-                    ),
-                    onPressed: () => onNavigate(2),
-                    icon: const Icon(Icons.add),
-                    label: const Text('إصدار سند قبض جديد', style: TextStyle(fontWeight: FontWeight.bold)),
-                  ),
-                ],
-              ),
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 13, top: 7),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            title,
+            style: const TextStyle(
+              color: AppColors.text,
+              fontSize: 17,
+              fontWeight: FontWeight.bold,
             ),
-            const SizedBox(height: 18),
-            Row(
-              children: [
-                Expanded(child: _StatCard(title: 'العملاء المسجلون', value: '${customers.length}', icon: Icons.storefront, color: Colors.blue)),
-                const SizedBox(width: 12),
-                Expanded(child: _StatCard(title: 'سندات اليوم', value: '${receipts.length}', icon: Icons.receipt_long, color: AppColors.green)),
-              ],
-            ),
-            const SizedBox(height: 18),
-            Container(
-              padding: const EdgeInsets.all(16),
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(15),
-                border: Border.all(color: AppColors.border),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text('ملخص التحصيل المحلي حسب العملة', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
-                  const Divider(height: 22),
-                  _currencyRow('ريال يمني', totals['yer'] ?? 0, 'ر.ي'),
-                  const SizedBox(height: 10),
-                  _currencyRow('ريال سعودي', totals['sar'] ?? 0, 'ر.س'),
-                  const SizedBox(height: 10),
-                  _currencyRow('دولار أمريكي', totals['usd'] ?? 0, '\$'),
-                ],
+          ),
+          if (subtitle != null) ...[
+            const SizedBox(height: 4),
+            Text(
+              subtitle!,
+              style: const TextStyle(
+                color: AppColors.muted,
+                fontSize: 12,
               ),
             ),
           ],
-        );
-      },
-    );
-  }
-
-  Widget _currencyRow(String label, double amount, String symbol) {
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-      children: [
-        Text(label, style: const TextStyle(color: AppColors.muted)),
-        Text('${money(amount)} $symbol',
-            style: const TextStyle(fontWeight: FontWeight.bold, color: AppColors.navy, fontSize: 15)),
-      ],
+        ],
+      ),
     );
   }
 }
 
-class _StatCard extends StatelessWidget {
+class EmptyState extends StatelessWidget {
+  final String title;
+  final String subtitle;
+  final IconData icon;
+
+  const EmptyState({
+    super.key,
+    required this.title,
+    required this.subtitle,
+    this.icon = Icons.inbox_outlined,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(30),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              icon,
+              size: 55,
+              color: AppColors.muted,
+            ),
+            const SizedBox(height: 12),
+            Text(
+              title,
+              style: const TextStyle(
+                color: AppColors.text,
+                fontWeight: FontWeight.bold,
+                fontSize: 17,
+              ),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              subtitle,
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                color: AppColors.muted,
+                fontSize: 12,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class StatCard extends StatelessWidget {
   final String title;
   final String value;
   final IconData icon;
   final Color color;
 
-  const _StatCard({required this.title, required this.value, required this.icon, required this.color});
+  const StatCard({
+    super.key,
+    required this.title,
+    required this.value,
+    required this.icon,
+    required this.color,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(15),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(15),
+        border: Border.all(color: AppColors.border),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(icon, color: color, size: 25),
+          const SizedBox(height: 10),
+          Text(
+            value,
+            style: const TextStyle(
+              color: AppColors.navy,
+              fontSize: 22,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          Text(
+            title,
+            style: const TextStyle(
+              color: AppColors.muted,
+              fontSize: 11,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ============================================================
+// 9. لوحة التحكم
+// ============================================================
+
+class DashboardPage extends StatefulWidget {
+  final ValueChanged<int> onNavigate;
+
+  const DashboardPage({
+    super.key,
+    required this.onNavigate,
+  });
+
+  @override
+  State<DashboardPage> createState() =>
+      _DashboardPageState();
+}
+
+class _DashboardPageState extends State<DashboardPage> {
+  late Future<_DashboardData> future;
+
+  @override
+  void initState() {
+    super.initState();
+    future = loadData();
+  }
+
+  Future<_DashboardData> loadData() async {
+    final customers = await dbRepo.getCustomers();
+    final receipts = await dbRepo.getReceipts();
+    final totals = await dbRepo.getLocalTotals();
+    final pending = await dbRepo.getPendingCount();
+
+    return _DashboardData(
+      customers: customers.length,
+      receipts: receipts.length,
+      totals: totals,
+      pending: pending,
+    );
+  }
+
+  Future<void> refresh() async {
+    setState(() => future = loadData());
+    await future;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return RefreshIndicator(
+      onRefresh: refresh,
+      child: FutureBuilder<_DashboardData>(
+        future: future,
+        builder: (context, snapshot) {
+          if (snapshot.connectionState ==
+              ConnectionState.waiting) {
+            return const Center(
+              child: CircularProgressIndicator(),
+            );
+          }
+
+          if (snapshot.hasError) {
+            return EmptyState(
+              title: 'تعذر تحميل البيانات',
+              subtitle: '${snapshot.error}',
+            );
+          }
+
+          final data = snapshot.data!;
+
+          return ListView(
+            padding: const EdgeInsets.all(16),
+            children: [
+              Container(
+                padding: const EdgeInsets.all(20),
+                decoration: BoxDecoration(
+                  gradient: const LinearGradient(
+                    colors: [
+                      AppColors.navy,
+                      AppColors.navyLight,
+                    ],
+                    begin: Alignment.topRight,
+                    end: Alignment.bottomLeft,
+                  ),
+                  borderRadius: BorderRadius.circular(18),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'مرحباً بك في محطة التحصيل الميداني',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 17,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    const Text(
+                      'إدارة عمليات التحصيل وسندات القبض.',
+                      style: TextStyle(
+                        color: Color(0xFFD1DBE8),
+                        fontSize: 12,
+                      ),
+                    ),
+                    const SizedBox(height: 15),
+                    Row(
+                      children: [
+                        const Icon(
+                          Icons.cloud_off_outlined,
+                          color: AppColors.gold,
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            '${data.pending} سند بانتظار المزامنة',
+                            style: const TextStyle(
+                              color: AppColors.gold,
+                              fontWeight: FontWeight.bold,
+                              fontSize: 12,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 15),
+                    ElevatedButton.icon(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: AppColors.gold,
+                        foregroundColor: AppColors.navy,
+                      ),
+                      onPressed: () => widget.onNavigate(2),
+                      icon: const Icon(Icons.add),
+                      label: const Text(
+                        'إصدار سند قبض جديد',
+                        style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 20),
+              const SectionTitle(title: 'ملخص النشاط'),
+              Row(
+                children: [
+                  Expanded(
+                    child: StatCard(
+                      title: 'العملاء',
+                      value: '${data.customers}',
+                      icon: Icons.people_outline,
+                      color: Colors.blue,
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: StatCard(
+                      title: 'السندات',
+                      value: '${data.receipts}',
+                      icon: Icons.receipt_long,
+                      color: AppColors.green,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 18),
+              StatCard(
+                title: 'السندات بانتظار المزامنة',
+                value: '${data.pending}',
+                icon: Icons.sync_problem_outlined,
+                color: AppColors.orange,
+              ),
+              const SizedBox(height: 20),
+              const SectionTitle(
+                title: 'إجمالي التحصيل حسب العملة',
+                subtitle: 'إجماليات محلية محفوظة على الجهاز',
+              ),
+              _CurrencySummary(totals: data.totals),
+              const SizedBox(height: 20),
+              const Text(
+                'الأرصدة المركزية لا تتغير بمجرد تسجيل سند محلي. يلزم ترحيله واعتماده من الخادم.',
+                style: TextStyle(
+                  color: AppColors.muted,
+                  fontSize: 11,
+                  height: 1.6,
+                ),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+}
+
+class _DashboardData {
+  final int customers;
+  final int receipts;
+  final int pending;
+  final Map<String, double> totals;
+
+  const _DashboardData({
+    required this.customers,
+    required this.receipts,
+    required this.pending,
+    required this.totals,
+  });
+}
+
+class _CurrencySummary extends StatelessWidget {
+  final Map<String, double> totals;
+
+  const _CurrencySummary({
+    required this.totals,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -533,103 +1139,233 @@ class _StatCard extends StatelessWidget {
         border: Border.all(color: AppColors.border),
       ),
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Icon(icon, color: color, size: 26),
-          const SizedBox(height: 10),
-          Text(value, style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
-          Text(title, style: const TextStyle(color: AppColors.muted, fontSize: 12)),
+          _row('الريال اليمني', totals['yer'] ?? 0, 'ر.ي'),
+          const Divider(height: 22),
+          _row('الريال السعودي', totals['sar'] ?? 0, 'ر.س'),
+          const Divider(height: 22),
+          _row('الدولار الأمريكي', totals['usd'] ?? 0, '\$'),
         ],
       ),
     );
   }
+
+  Widget _row(String title, double value, String symbol) {
+    return Row(
+      children: [
+        Expanded(
+          child: Text(
+            title,
+            style: const TextStyle(
+              color: AppColors.muted,
+              fontSize: 13,
+            ),
+          ),
+        ),
+        Text(
+          '${money(value)} $symbol',
+          style: const TextStyle(
+            color: AppColors.navy,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+      ],
+    );
+  }
 }
+
+// ============================================================
+// 10. إدارة العملاء
+// ============================================================
 
 class CustomersPage extends StatefulWidget {
   const CustomersPage({super.key});
 
   @override
-  State<CustomersPage> createState() => _CustomersPageState();
+  State<CustomersPage> createState() =>
+      _CustomersPageState();
 }
 
 class _CustomersPageState extends State<CustomersPage> {
-  final searchCtrl = TextEditingController();
+  final searchController = TextEditingController();
+
+  late Future<List<CustomerRecord>> future;
+
+  @override
+  void initState() {
+    super.initState();
+    future = dbRepo.getCustomers();
+  }
 
   @override
   void dispose() {
-    searchCtrl.dispose();
+    searchController.dispose();
     super.dispose();
   }
 
-  void openStatement(CustomerRecord customer) async {
-    final receipts = await dbRepo.getReceipts(customerCode: customer.code);
+  void reload() {
+    setState(() {
+      future = dbRepo.getCustomers(
+        search: searchController.text,
+      );
+    });
+  }
+
+  Future<void> openCustomerForm([
+    CustomerRecord? customer,
+  ]) async {
+    final result = await showDialog<CustomerRecord>(
+      context: context,
+      builder: (_) => CustomerFormDialog(
+        customer: customer,
+      ),
+    );
+
+    if (result == null) return;
+
+    try {
+      await dbRepo.saveCustomer(result);
+      reload();
+      showMsg('تم حفظ بيانات العميل');
+    } catch (e) {
+      showMsg('تعذر حفظ العميل: $e', error: true);
+    }
+  }
+
+  Future<void> openStatement(
+    CustomerRecord customer,
+  ) async {
+    final receipts = await dbRepo.getReceipts(
+      customerCode: customer.code,
+    );
+
     if (!mounted) return;
+
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.white,
       shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(22)),
-      ),
-      builder: (_) => SizedBox(
-        height: MediaQuery.of(context).size.height * 0.75,
-        child: Padding(
-          padding: const EdgeInsets.all(20),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text('كشف حساب: ${customer.name}', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-              Text('الكود: ${customer.code} • ${customer.area}', style: const TextStyle(color: AppColors.muted, fontSize: 12)),
-              const Divider(height: 24),
-              const Text('الأرصدة الدفترية:', style: TextStyle(fontWeight: FontWeight.bold)),
-              const SizedBox(height: 8),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceAround,
-                children: [
-                  _balBox('يمني', '${money(customer.balanceYer)} ر.ي'),
-                  _balBox('سعودي', '${money(customer.balanceSar)} ر.س'),
-                  _balBox('دولار', '${money(customer.balanceUsd)} \$'),
-                ],
-              ),
-              const SizedBox(height: 18),
-              const Text('سندات التحصيل المسجلة للعميل:', style: TextStyle(fontWeight: FontWeight.bold)),
-              const SizedBox(height: 8),
-              Expanded(
-                child: receipts.isEmpty
-                    ? const Center(child: Text('لا توجد سندات مسجلة لهذا العميل'))
-                    : ListView.builder(
-                        itemCount: receipts.length,
-                        itemBuilder: (context, i) {
-                          final r = receipts[i];
-                          return Card(
-                            margin: const EdgeInsets.only(bottom: 8),
-                            child: ListTile(
-                              title: Text('${money(r.amount)} ${currencyShort(r.currency)}',
-                                  style: const TextStyle(fontWeight: FontWeight.bold)),
-                              subtitle: Text('${r.number} • ${r.method}'),
-                              trailing: Text(statusArabic(r.status),
-                                  style: const TextStyle(color: AppColors.green, fontSize: 12)),
-                            ),
-                          );
-                        },
-                      ),
-              ),
-            ],
-          ),
+        borderRadius: BorderRadius.vertical(
+          top: Radius.circular(22),
         ),
       ),
+      builder: (_) {
+        return SizedBox(
+          height: MediaQuery.of(context).size.height * 0.78,
+          child: Padding(
+            padding: const EdgeInsets.all(18),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'كشف حساب: ${customer.name}',
+                  style: const TextStyle(
+                    fontSize: 17,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 5),
+                Text(
+                  '${customer.code} • ${customer.area}',
+                  style: const TextStyle(
+                    color: AppColors.muted,
+                    fontSize: 12,
+                  ),
+                ),
+                const Divider(height: 25),
+                const Text(
+                  'الأرصدة المحفوظة للعميل',
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
+                const SizedBox(height: 10),
+                _balanceRow(
+                  'الريال اليمني',
+                  customer.balanceYer,
+                  'ر.ي',
+                ),
+                _balanceRow(
+                  'الريال السعودي',
+                  customer.balanceSar,
+                  'ر.س',
+                ),
+                _balanceRow(
+                  'الدولار',
+                  customer.balanceUsd,
+                  '\$',
+                ),
+                const Divider(height: 25),
+                const Text(
+                  'سندات التحصيل المحلية',
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
+                const SizedBox(height: 10),
+                Expanded(
+                  child: receipts.isEmpty
+                      ? const EmptyState(
+                          title: 'لا توجد سندات',
+                          subtitle: 'لم تسجل تحصيلات لهذا العميل بعد.',
+                        )
+                      : ListView.builder(
+                          itemCount: receipts.length,
+                          itemBuilder: (context, index) {
+                            final r = receipts[index];
+
+                            return ListTile(
+                              contentPadding: EdgeInsets.zero,
+                              leading: const Icon(
+                                Icons.receipt_long,
+                                color: AppColors.navy,
+                              ),
+                              title: Text(
+                                '${money(r.amount)} ${currencyShort(r.currency)}',
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                              subtitle: Text(
+                                '${r.number} • ${r.method}',
+                              ),
+                              trailing: const Icon(
+                                Icons.pending_outlined,
+                                color: AppColors.orange,
+                                size: 19,
+                              ),
+                            );
+                          },
+                        ),
+                ),
+                const Text(
+                  'كشف محلي فقط، ولا يمثل كشف الحساب المركزي في Life Ex Pro.',
+                  style: TextStyle(
+                    fontSize: 10,
+                    color: AppColors.muted,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
     );
   }
 
-  Widget _balBox(String title, String val) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      decoration: BoxDecoration(color: AppColors.background, borderRadius: BorderRadius.circular(10)),
-      child: Column(
+  Widget _balanceRow(
+    String title,
+    double amount,
+    String symbol,
+  ) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 5),
+      child: Row(
         children: [
-          Text(title, style: const TextStyle(fontSize: 11, color: AppColors.muted)),
-          const SizedBox(height: 4),
-          Text(val, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+          Expanded(child: Text(title)),
+          Text(
+            '${money(amount)} $symbol',
+            style: const TextStyle(
+              fontWeight: FontWeight.bold,
+            ),
+          ),
         ],
       ),
     );
@@ -640,63 +1376,102 @@ class _CustomersPageState extends State<CustomersPage> {
     return Column(
       children: [
         Padding(
-          padding: const EdgeInsets.all(16),
+          padding: const EdgeInsets.all(15),
           child: Row(
             children: [
               Expanded(
                 child: TextField(
-                  controller: searchCtrl,
-                  onChanged: (_) => setState(() {}),
+                  controller: searchController,
+                  onChanged: (_) => reload(),
                   decoration: const InputDecoration(
-                    hintText: 'ابحث باسم الصيدلية أو الكود...',
+                    hintText: 'ابحث باسم العميل أو رقمه أو هاتفه',
                     prefixIcon: Icon(Icons.search),
-                    filled: true,
-                    fillColor: Colors.white,
                   ),
                 ),
+              ),
+              const SizedBox(width: 9),
+              IconButton.filled(
+                onPressed: () => openCustomerForm(),
+                style: IconButton.styleFrom(
+                  backgroundColor: AppColors.navy,
+                  foregroundColor: Colors.white,
+                ),
+                icon: const Icon(Icons.person_add_alt_1),
               ),
             ],
           ),
         ),
         Expanded(
           child: FutureBuilder<List<CustomerRecord>>(
-            future: dbRepo.getCustomers(search: searchCtrl.text),
+            future: future,
             builder: (context, snapshot) {
-              if (snapshot.connectionState == ConnectionState.waiting) {
-                return const Center(child: CircularProgressIndicator());
+              if (snapshot.connectionState ==
+                  ConnectionState.waiting) {
+                return const Center(
+                  child: CircularProgressIndicator(),
+                );
               }
-              final list = snapshot.data ?? [];
-              if (list.isEmpty) {
-                return const Center(child: Text('لا يوجد عملاء'));
+
+              if (snapshot.hasError) {
+                return EmptyState(
+                  title: 'حدث خطأ',
+                  subtitle: '${snapshot.error}',
+                );
               }
+
+              final customers = snapshot.data ?? [];
+
+              if (customers.isEmpty) {
+                return const EmptyState(
+                  title: 'لا يوجد عملاء',
+                  subtitle: 'اضغط زر الإضافة لتسجيل أول عميل.',
+                  icon: Icons.people_outline,
+                );
+              }
+
               return ListView.builder(
-                padding: const EdgeInsets.symmetric(horizontal: 16),
-                itemCount: list.length,
-                itemBuilder: (context, i) {
-                  final c = list[i];
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 15,
+                ),
+                itemCount: customers.length,
+                itemBuilder: (context, index) {
+                  final c = customers[index];
+
                   return Card(
                     elevation: 0,
-                    margin: const EdgeInsets.only(bottom: 10),
+                    margin: const EdgeInsets.only(bottom: 9),
                     shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(14),
-                      side: const BorderSide(color: AppColors.border),
+                      side: const BorderSide(
+                        color: AppColors.border,
+                      ),
                     ),
                     child: ListTile(
                       onTap: () => openStatement(c),
                       leading: const CircleAvatar(
                         backgroundColor: AppColors.navy,
-                        child: Icon(Icons.storefront, color: AppColors.gold),
+                        child: Icon(
+                          Icons.storefront,
+                          color: AppColors.gold,
+                        ),
                       ),
-                      title: Text(c.name, style: const TextStyle(fontWeight: FontWeight.bold)),
-                      subtitle: Text('كود: ${c.code} • ${c.area}'),
-                      trailing: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        crossAxisAlignment: CrossAxisAlignment.end,
-                        children: [
-                          Text('${money(c.balanceYer)} ر.ي',
-                              style: const TextStyle(fontWeight: FontWeight.bold, color: AppColors.navy)),
-                          const Text('كشف الحساب ⬅', style: TextStyle(fontSize: 11, color: AppColors.muted)),
-                        ],
+                      title: Text(
+                        c.name,
+                        style: const TextStyle(
+                          fontWeight: FontWeight.bold,
+                          fontSize: 13,
+                        ),
+                      ),
+                      subtitle: Text(
+                        '${c.code} • ${c.area}',
+                        style: const TextStyle(fontSize: 11),
+                      ),
+                      trailing: IconButton(
+                        onPressed: () => openCustomerForm(c),
+                        icon: const Icon(
+                          Icons.edit_outlined,
+                          color: AppColors.navy,
+                        ),
                       ),
                     ),
                   );
@@ -710,6 +1485,211 @@ class _CustomersPageState extends State<CustomersPage> {
   }
 }
 
+// ============================================================
+// 11. نموذج إضافة وتعديل عميل
+// ============================================================
+
+class CustomerFormDialog extends StatefulWidget {
+  final CustomerRecord? customer;
+
+  const CustomerFormDialog({
+    super.key,
+    this.customer,
+  });
+
+  @override
+  State<CustomerFormDialog> createState() =>
+      _CustomerFormDialogState();
+}
+
+class _CustomerFormDialogState
+    extends State<CustomerFormDialog> {
+  final formKey = GlobalKey<FormState>();
+
+  late final TextEditingController code;
+  late final TextEditingController name;
+  late final TextEditingController area;
+  late final TextEditingController phone;
+  late final TextEditingController yer;
+  late final TextEditingController sar;
+  late final TextEditingController usd;
+
+  @override
+  void initState() {
+    super.initState();
+
+    final c = widget.customer;
+
+    code = TextEditingController(text: c?.code ?? '');
+    name = TextEditingController(text: c?.name ?? '');
+    area = TextEditingController(text: c?.area ?? '');
+    phone = TextEditingController(text: c?.phone ?? '');
+    yer = TextEditingController(
+      text: c?.balanceYer.toString() ?? '0',
+    );
+    sar = TextEditingController(
+      text: c?.balanceSar.toString() ?? '0',
+    );
+    usd = TextEditingController(
+      text: c?.balanceUsd.toString() ?? '0',
+    );
+  }
+
+  @override
+  void dispose() {
+    code.dispose();
+    name.dispose();
+    area.dispose();
+    phone.dispose();
+    yer.dispose();
+    sar.dispose();
+    usd.dispose();
+    super.dispose();
+  }
+
+  double parse(TextEditingController c) {
+    return double.tryParse(c.text.trim()) ?? 0;
+  }
+
+  Widget field(
+    TextEditingController controller,
+    String label, {
+    bool numeric = false,
+    bool enabled = true,
+    bool required = false,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: TextFormField(
+        controller: controller,
+        enabled: enabled,
+        keyboardType: numeric
+            ? const TextInputType.numberWithOptions(
+                decimal: true,
+              )
+            : TextInputType.text,
+        inputFormatters: numeric
+            ? [
+                FilteringTextInputFormatter.allow(
+                  RegExp(r'[0-9.]'),
+                ),
+              ]
+            : null,
+        validator: (value) {
+          if (required &&
+              (value == null || value.trim().isEmpty)) {
+            return 'هذا الحقل مطلوب';
+          }
+
+          if (numeric &&
+              (value == null ||
+                  double.tryParse(value.trim()) == null ||
+                  double.parse(value.trim()) < 0)) {
+            return 'أدخل رقماً صحيحاً';
+          }
+
+          return null;
+        },
+        decoration: InputDecoration(labelText: label),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: Text(
+        widget.customer == null
+            ? 'إضافة عميل جديد'
+            : 'تعديل بيانات العميل',
+      ),
+      content: SizedBox(
+        width: 430,
+        child: SingleChildScrollView(
+          child: Form(
+            key: formKey,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                field(
+                  code,
+                  'كود العميل',
+                  enabled: widget.customer == null,
+                  required: true,
+                ),
+                field(
+                  name,
+                  'اسم العميل',
+                  required: true,
+                ),
+                field(area, 'المنطقة'),
+                field(phone, 'رقم الهاتف'),
+                const Divider(height: 25),
+                const Align(
+                  alignment: Alignment.centerRight,
+                  child: Text(
+                    'الأرصدة الافتتاحية',
+                    style: TextStyle(
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
+                field(
+                  yer,
+                  'رصيد الريال اليمني',
+                  numeric: true,
+                ),
+                field(
+                  sar,
+                  'رصيد الريال السعودي',
+                  numeric: true,
+                ),
+                field(
+                  usd,
+                  'رصيد الدولار',
+                  numeric: true,
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('إلغاء'),
+        ),
+        FilledButton(
+          style: FilledButton.styleFrom(
+            backgroundColor: AppColors.navy,
+          ),
+          onPressed: () {
+            if (!formKey.currentState!.validate()) return;
+
+            Navigator.pop(
+              context,
+              CustomerRecord(
+                code: code.text.trim(),
+                name: name.text.trim(),
+                area: area.text.trim(),
+                phone: phone.text.trim(),
+                balanceYer: parse(yer),
+                balanceSar: parse(sar),
+                balanceUsd: parse(usd),
+              ),
+            );
+          },
+          child: const Text('حفظ'),
+        ),
+      ],
+    );
+  }
+}
+
+// ============================================================
+// 12. شاشة التحصيل
+// ============================================================
+
 class CollectPage extends StatefulWidget {
   const CollectPage({super.key});
 
@@ -718,317 +1698,120 @@ class CollectPage extends StatefulWidget {
 }
 
 class _CollectPageState extends State<CollectPage> {
+  final amountController = TextEditingController();
+  final transferController = TextEditingController();
+  final noteController = TextEditingController();
+
+  final formKey = GlobalKey<FormState>();
+
+  List<CustomerRecord> customers = [];
+
   CustomerRecord? selectedCustomer;
+
   CurrencyType currency = CurrencyType.yer;
-  String method = 'نقداً';
+
+  String method = 'نقد';
+
   String network = 'الكريمي';
 
-  final amountCtrl = TextEditingController();
-  final transferCtrl = TextEditingController();
-  final noteCtrl = TextEditingController();
+  final networks = const [
+    'الكريمي',
+    'النجم',
+    'الامتياز',
+    'يمن إكسبرس',
+    'محفظتي',
+    'جيب',
+    'ون كاش',
+    'أخرى',
+  ];
+
+  bool loading = true;
   bool saving = false;
 
-  final networks = const ['الكريمي', 'النجم', 'الامتياز', 'يمن إكسبرس', 'أخرى'];
+  @override
+  void initState() {
+    super.initState();
+    loadCustomers();
+  }
 
   @override
   void dispose() {
-    amountCtrl.dispose();
-    transferCtrl.dispose();
-    noteCtrl.dispose();
+    amountController.dispose();
+    transferController.dispose();
+    noteController.dispose();
     super.dispose();
   }
 
-  void pickCustomer() async {
-    final customers = await dbRepo.getCustomers();
-    if (!mounted) return;
+  Future<void> loadCustomers() async {
+    try {
+      final result = await dbRepo.getCustomers();
+
+      if (!mounted) return;
+
+      setState(() {
+        customers = result;
+        loading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+
+      setState(() => loading = false);
+      showMsg('تعذر تحميل العملاء: $e', error: true);
+    }
+  }
+
+  Future<void> pickCustomer() async {
+    if (loading) return;
+
+    if (customers.isEmpty) {
+      showMsg('أضف العملاء أولاً', error: true);
+      return;
+    }
 
     final chosen = await showModalBottomSheet<CustomerRecord>(
       context: context,
+      isScrollControlled: true,
       backgroundColor: Colors.white,
       shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-      ),
-      builder: (ctx) => Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          children: [
-            const Text('اختر الصيدلية / العميل', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-            const Divider(),
-            Expanded(
-              child: ListView.builder(
-                itemCount: customers.length,
-                builder: (_, i) {
-                  final c = customers[i];
-                  return ListTile(
-                    leading: const Icon(Icons.storefront, color: AppColors.navy),
-                    title: Text(c.name, style: const TextStyle(fontWeight: FontWeight.bold)),
-                    subtitle: Text('${c.code} • الرصيد: ${money(c.balanceYer)} ر.ي'),
-                    onTap: () => Navigator.pop(ctx, c),
-                  );
-                },
-              ),
-            ),
-          ],
+        borderRadius: BorderRadius.vertical(
+          top: Radius.circular(20),
         ),
       ),
-    );
-
-    if (chosen != null) {
-      setState(() => selectedCustomer = chosen);
-    }
-  }
-
-  void submit() async {
-    if (selectedCustomer == null) {
-      showMsg('الرجاء اختيار الصيدلية أولاً', error: true);
-      return;
-    }
-    final amount = double.tryParse(amountCtrl.text.trim()) ?? 0;
-    if (amount <= 0) {
-      showMsg('أدخل مبلغ تحصيل صحيح أكبر من صفر', error: true);
-      return;
-    }
-
-    setState(() => saving = true);
-    try {
-      final receipt = await dbRepo.saveReceipt(
-        customer: selectedCustomer!,
-        amount: amount,
-        currency: currency,
-        method: method,
-        network: method == 'حوالة' ? network : null,
-        transferRef: method == 'حوالة' ? transferCtrl.text.trim() : null,
-        note: noteCtrl.text.trim(),
-      );
-
-      setState(() {
-        saving = false;
-        selectedCustomer = null;
-        amountCtrl.clear();
-        transferCtrl.clear();
-        noteCtrl.clear();
-      });
-
-      showMsg('تم حفظ السند رقم ${receipt.number} بنجاح');
-    } catch (e) {
-      setState(() => saving = false);
-      showMsg('خطأ في الحفظ: $e', error: true);
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return ListView(
-      padding: const EdgeInsets.all(16),
-      children: [
-        InkWell(
-          onTap: pickCustomer,
-          borderRadius: BorderRadius.circular(14),
-          child: Container(
-            padding: const EdgeInsets.all(16),
-            decoration: BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.circular(14),
-              border: Border.all(color: AppColors.border),
-            ),
-            child: Row(
-              children: [
-                const Icon(Icons.storefront, color: AppColors.navy),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Text(
-                    selectedCustomer == null
-                        ? 'اضغط لاختيار الصيدلية / العميل...'
-                        : '${selectedCustomer!.name} (${selectedCustomer!.code})',
-                    style: TextStyle(
-                      fontWeight: selectedCustomer == null ? FontWeight.normal : FontWeight.bold,
-                      fontSize: 15,
-                    ),
+      builder: (ctx) {
+        return SizedBox(
+          height: MediaQuery.of(ctx).size.height * 0.7,
+          child: Column(
+            children: [
+              const Padding(
+                padding: EdgeInsets.all(17),
+                child: Text(
+                  'اختر العميل',
+                  style: TextStyle(
+                    fontSize: 17,
+                    fontWeight: FontWeight.bold,
                   ),
                 ),
-                const Icon(Icons.arrow_drop_down),
-              ],
-            ),
-          ),
-        ),
-        const SizedBox(height: 16),
-        DropdownButtonFormField<CurrencyType>(
-          value: currency,
-          decoration: const InputDecoration(labelText: 'عملة السند', prefixIcon: Icon(Icons.currency_exchange)),
-          items: const [
-            DropdownMenuItem(value: CurrencyType.yer, child: Text('ريال يمني (ر.ي)')),
-            DropdownMenuItem(value: CurrencyType.sar, child: Text('ريال سعودي (ر.س)')),
-            DropdownMenuItem(value: CurrencyType.usd, child: Text('دولار أمريكي (\$)')),
-          ],
-          onChanged: (v) {
-            if (v != null) setState(() => currency = v);
-          },
-        ),
-        const SizedBox(height: 16),
-        TextField(
-          controller: amountCtrl,
-          keyboardType: const TextInputType.numberWithOptions(decimal: true),
-          inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[0-9.]'))],
-          decoration: const InputDecoration(labelText: 'المبلغ المستلم', prefixIcon: Icon(Icons.payments_outlined)),
-        ),
-        const SizedBox(height: 16),
-        Row(
-          children: [
-            Expanded(
-              child: RadioListTile<String>(
-                title: const Text('نقداً'),
-                value: 'نقداً',
-                groupValue: method,
-                onChanged: (v) => setState(() => method = v!),
               ),
-            ),
-            Expanded(
-              child: RadioListTile<String>(
-                title: const Text('حوالة'),
-                value: 'حوالة',
-                groupValue: method,
-                onChanged: (v) => setState(() => method = v!),
-              ),
-            ),
-          ],
-        ),
-        if (method == 'حوالة') ...[
-          const SizedBox(height: 10),
-          DropdownButtonFormField<String>(
-            value: network,
-            decoration: const InputDecoration(labelText: 'شبكة التحويل'),
-            items: networks.map((n) => DropdownMenuItem(value: n, child: Text(n))).toList(),
-            onChanged: (v) {
-              if (v != null) setState(() => network = v);
-            },
-          ),
-          const SizedBox(height: 12),
-          TextField(
-            controller: transferCtrl,
-            decoration: const InputDecoration(labelText: 'رقم إشعار الحوالة', prefixIcon: Icon(Icons.numbers)),
-          ),
-        ],
-        const SizedBox(height: 16),
-        TextField(
-          controller: noteCtrl,
-          decoration: const InputDecoration(labelText: 'ملاحظات (اختياري)', prefixIcon: Icon(Icons.note_alt_outlined)),
-        ),
-        const SizedBox(height: 24),
-        SizedBox(
-          height: 52,
-          child: ElevatedButton.icon(
-            style: ElevatedButton.styleFrom(
-              backgroundColor: AppColors.navy,
-              foregroundColor: Colors.white,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-            ),
-            onPressed: saving ? null : submit,
-            icon: const Icon(Icons.save_outlined),
-            label: Text(saving ? 'جاري الحفظ...' : 'حفظ واعتماد السند محلياً',
-                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-          ),
-        ),
-      ],
-    );
-  }
-}
+              const Divider(height: 1),
+              Expanded(
+                child: ListView.builder(
+                  itemCount: customers.length,
+                  itemBuilder: (context, index) {
+                    final c = customers[index];
 
-class HistoryPage extends StatelessWidget {
-  const HistoryPage({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return FutureBuilder<List<ReceiptModel>>(
-      future: dbRepo.getReceipts(),
-      builder: (context, snapshot) {
-        if (snapshot.connectionState == ConnectionState.waiting) {
-          return const Center(child: CircularProgressIndicator());
-        }
-        final list = snapshot.data ?? [];
-        if (list.isEmpty) {
-          return const Center(child: Text('لا توجد سندات مسجلة حتى الآن'));
-        }
-        return ListView.builder(
-          padding: const EdgeInsets.all(16),
-          itemCount: list.length,
-          itemBuilder: (context, i) {
-            final r = list[i];
-            return Card(
-              elevation: 0,
-              margin: const EdgeInsets.only(bottom: 10),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(14),
-                side: const BorderSide(color: AppColors.border),
-              ),
-              child: ListTile(
-                leading: const CircleAvatar(
-                  backgroundColor: AppColors.navy,
-                  child: Icon(Icons.receipt, color: AppColors.gold),
-                ),
-                title: Text('${money(r.amount)} ${currencyShort(r.currency)} — ${r.customerName}',
-                    style: const TextStyle(fontWeight: FontWeight.bold)),
-                subtitle: Text('سند: ${r.number}\nالطريقة: ${r.method}'),
-                isThreeLine: true,
-                trailing: Text(statusArabic(r.status),
-                    style: const TextStyle(color: AppColors.green, fontWeight: FontWeight.bold, fontSize: 12)),
-              ),
-            );
-          },
-        );
-      },
-    );
-  }
-}
-
-class CashDrawerPage extends StatelessWidget {
-  const CashDrawerPage({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return FutureBuilder>(
-      future: dbRepo.getLocalTotals(),
-      builder: (context, snapshot) {
-        if (snapshot.connectionState == ConnectionState.waiting) {
-          return const Center(child: CircularProgressIndicator());
-        }
-        final totals = snapshot.data ?? {'yer': 0, 'sar': 0, 'usd': 0};
-        return ListView(
-          padding: const EdgeInsets.all(16),
-          children: [
-            Container(
-              padding: const EdgeInsets.all(20),
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(16),
-                border: Border.all(color: AppColors.border),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text('إجمالي العهدة الميدانية المحصلة', style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold)),
-                  const Divider(height: 28),
-                  _row('الريال اليمني', totals['yer'] ?? 0, 'ر.ي'),
-                  const Divider(height: 24),
-                  _row('الريال السعودي', totals['sar'] ?? 0, 'ر.س'),
-                  const Divider(height: 24),
-                  _row('الدولار الأمريكي', totals['usd'] ?? 0, '\$'),
-                ],
-              ),
-            ),
-          ],
-        );
-      },
-    );
-  }
-
-  Widget _row(String title, double val, String symbol) {
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-      children: [
-        Text(title, style: const TextStyle(fontSize: 15, color: AppColors.muted)),
-        Text('${money(val)} $symbol',
-            style: const TextStyle(fontSize: 17, fontWeight: FontWeight.bold, color: AppColors.navy)),
-      ],
-    );
-  }
-}
+                    return ListTile(
+                      leading: const CircleAvatar(
+                        backgroundColor: AppColors.navy,
+                        child: Icon(
+                          Icons.storefront,
+                          color: AppColors.gold,
+                        ),
+                      ),
+                      title: Text(c.name),
+                      subtitle: Text(
+                        '${c.code} • ${c.area}',
+                      ),
+                      onTap: () {
+                        Navigator.pop(ctx, c);
+                      },
+                   
