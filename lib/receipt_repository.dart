@@ -144,6 +144,9 @@ class ReceiptRepository {
     if (!amount.isFinite || amount <= 0) {
       throw ArgumentError('مبلغ السند غير صحيح.');
     }
+    if ((amount * 100).roundToDouble() / 100 != amount) {
+      throw ArgumentError('المبلغ لا يمكن أن يحتوي على أكثر من خانتين عشريتين.');
+    }
     if (method != 'نقداً' && method != 'حوالة') {
       throw ArgumentError('طريقة القبض غير صحيحة.');
     }
@@ -159,7 +162,6 @@ class ReceiptRepository {
 
     try {
       return await db.transaction((txn) async {
-        // التحقق أولاً من وجود العميل قبل أي عملية عدادات
         final customer = await txn.query(
           'customers',
           columns: ['code'],
@@ -249,8 +251,9 @@ class ReceiptRepository {
         return receipt;
       });
     } on DatabaseException catch (e) {
-      if (e.isUniqueConstraintError() || e.toString().contains('UNIQUE constraint failed')) {
-        if (e.toString().contains('idx_unique_transfer_ref')) {
+      final err = e.toString();
+      if (e.isUniqueConstraintError() || err.contains('UNIQUE constraint failed')) {
+        if (err.contains('receipts.transfer_ref') || err.contains('receipts.network')) {
           throw ReceiptPersistenceException('رقم إشعار الحوالة ($cleanTransferRef) مسجل مسبقاً لشبكة ($network).');
         }
         throw ReceiptPersistenceException('رقم السند مكرر في قاعدة البيانات.');
@@ -259,7 +262,6 @@ class ReceiptRepository {
     }
   }
 
-  // تصحيح النوع البرمجي الصريح دون وسوم مفقودة
   Future<void> saveCustomers(List> customers) async {
     final db = await _helper.database;
     await db.transaction((txn) async {
