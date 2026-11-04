@@ -306,7 +306,7 @@ class _CollectorShellState extends State<CollectorShell> {
         await db.rawQuery('SELECT COUNT(*) FROM customers'),
       ) ?? 0;
 
-      if (count == 0 && kDebugMode) {
+      if (count == 0) {
         await _repository.saveCustomers(
           _seedCustomers.map((c) => {
             'code': c.code,
