@@ -7,7 +7,6 @@ class DatabaseHelper {
 
   static final DatabaseHelper instance = DatabaseHelper._();
 
-  // رفع الإصدار إلى 2 لتفعيل الترقية على الأجهزة الحالية
   static const int databaseVersion = 2;
   static const String databaseName = 'dawacom_collector.db';
 
@@ -86,18 +85,29 @@ class DatabaseHelper {
     await db.execute('CREATE INDEX idx_receipts_sync ON receipts(sync_status)');
     await db.execute('CREATE INDEX idx_receipts_status ON receipts(status)');
 
-    // الفهرس الفريد لمنع تكرار الحوالات
     await db.execute('''
       CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_transfer_ref 
       ON receipts(network, transfer_ref) 
       WHERE method = 'حوالة' AND transfer_ref IS NOT NULL AND status != 'draft'
     ''');
 
-    debugPrint('Dawacom SQLite database initialized (v$version).');
+    debugPrint('Dawacom SQLite database initialized.');
   }
 
   Future<void> _upgradeDatabase(Database db, int oldVersion, int newVersion) async {
     if (oldVersion < 2) {
+      // تمييز الحوالات المكررة القديمة دون حذف أي سجل مالي
+      await db.execute('''
+        UPDATE receipts
+        SET transfer_ref = transfer_ref || '-DUP-' || id
+        WHERE id NOT IN (
+          SELECT MAX(id)
+          FROM receipts
+          WHERE method = 'حوالة' AND transfer_ref IS NOT NULL AND status != 'draft'
+          GROUP BY network, transfer_ref
+        ) AND method = 'حوالة' AND transfer_ref IS NOT NULL AND status != 'draft'
+      ''');
+
       await db.execute('''
         CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_transfer_ref 
         ON receipts(network, transfer_ref) 
