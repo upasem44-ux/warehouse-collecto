@@ -97,14 +97,14 @@ class TafqeetEngine {
     '', 'مائة', 'مائتان', 'ثلاثمائة', 'أربعمائة', 'خمسمائة', 'ستمائة', 'سبعمائة', 'ثمانمائة', 'تسعمائة'
   ];
 
-  static String _convertThreeDigits(int n, {bool isScaleOfNoun = false}) {
+  static String _convertThreeDigits(int n, {bool isScale = false}) {
     if (n == 0) return '';
     String res = '';
     int h = n ~/ 100;
     int rem = n % 100;
 
     if (h > 0) {
-      if (h == 2 && rem == 0 && isScaleOfNoun) {
+      if (h == 2 && rem == 0 && isScale) {
         res += 'مائتا';
       } else {
         res += _hundreds[h];
@@ -130,17 +130,27 @@ class TafqeetEngine {
   static String _formatScale(int val, String singular, String dual, String plural, String accusative) {
     if (val == 1) return singular;
     if (val == 2) return dual;
-    int rem100 = val % 100;
-    if (rem100 >= 3 && rem100 <= 10) {
-      return '${_convertThreeDigits(val, isScaleOfNoun: true)} $plural';
+
+    // المئات الصريحة (100، 200، 300...) تأخذ المفرد: مائتا ألف / مائة مليون
+    if (val % 100 == 0) {
+      return '${_convertThreeDigits(val, isScale: true)} $singular';
     }
-    return '${_convertThreeDigits(val, isScaleOfNoun: true)} $accusative';
+
+    if (val > 100 && (val % 100) == 2) {
+      final hundredsOnly = (val ~/ 100) * 100;
+      return '${_convertThreeDigits(hundredsOnly, isScale: true)} $singular و$dual';
+    }
+
+    final rem100 = val % 100;
+    if (rem100 >= 3 && rem100 <= 10) {
+      return '${_convertThreeDigits(val, isScale: true)} $plural';
+    }
+    return '${_convertThreeDigits(val, isScale: true)} $accusative';
   }
 
   static String convert(double amount, CurrencyType currency) {
     if (amount <= 0) return 'صفر ${currency.label} لا غير';
 
-    // منع أخطاء الكسور التقريبية وتثبيتها لخانتين
     final double normalized = double.parse(amount.toStringAsFixed(2));
     final int integerPart = normalized.floor();
     final int decimalPart = ((normalized - integerPart) * 100).round();
@@ -152,18 +162,10 @@ class TafqeetEngine {
 
     List<String> parts = [];
 
-    if (billions > 0) {
-      parts.add(_formatScale(billions, 'مليار', 'ملياران', 'مليارات', 'مليار'));
-    }
-    if (millions > 0) {
-      parts.add(_formatScale(millions, 'مليون', 'مليونان', 'ملايين', 'مليون'));
-    }
-    if (thousands > 0) {
-      parts.add(_formatScale(thousands, 'ألف', 'ألفان', 'آلاف', 'ألف'));
-    }
-    if (remaining > 0) {
-      parts.add(_convertThreeDigits(remaining));
-    }
+    if (billions > 0) parts.add(_formatScale(billions, 'مليار', 'ملياران', 'مليارات', 'ملياراً'));
+    if (millions > 0) parts.add(_formatScale(millions, 'مليون', 'مليونان', 'ملايين', 'مليوناً'));
+    if (thousands > 0) parts.add(_formatScale(thousands, 'ألف', 'ألفان', 'آلاف', 'ألفاً'));
+    if (remaining > 0) parts.add(_convertThreeDigits(remaining));
 
     String mainText = parts.isEmpty ? 'صفر' : parts.join(' و');
     String result = 'فقط $mainText ${currency.label}';
@@ -304,7 +306,6 @@ class _CollectorShellState extends State<CollectorShell> {
         await db.rawQuery('SELECT COUNT(*) FROM customers'),
       ) ?? 0;
 
-      // حقن البيانات التجريبية في وضع التطوير فقط إن كان الجدول فارغاً
       if (count == 0 && kDebugMode) {
         await _repository.saveCustomers(
           _seedCustomers.map((c) => {
@@ -747,7 +748,7 @@ class _CustomersPageState extends State<CustomersPage> {
 }
 
 // ============================================================================
-// 6. OFFICIAL RECEIPT ENTRY (FIXED DROPDOWN & PREVIEW MATCHING)
+// 6. OFFICIAL RECEIPT ENTRY
 // ============================================================================
 
 class CollectPage extends StatefulWidget {
@@ -773,7 +774,6 @@ class _CollectPageState extends State<CollectPage> {
   final _noteController = TextEditingController();
   final _transferRefController = TextEditingController();
 
-  // تخزين الكود فقط لمنع انهيار الـ Dropdown بعد التحديث
   String? _selectedCode;
   CurrencyType _currency = CurrencyType.yer;
   String _method = 'نقداً';
@@ -810,12 +810,19 @@ class _CollectPageState extends State<CollectPage> {
   void _triggerVoucherReview(ReceiptStatus targetStatus) async {
     if (_isOpeningReview) return;
 
+    final rawAmountText = _normalizeDigits(_amountController.text);
+    final parsedAmount = double.tryParse(rawAmountText) ?? 0.0;
+
     if (_selected == null) {
       _snack('يرجى اختيار الصيدلية أولاً');
       return;
     }
-    if (_amount <= 0) {
+    if (parsedAmount <= 0) {
       _snack('يرجى كتابة مبلغ صحيح');
+      return;
+    }
+    if ((parsedAmount * 100).roundToDouble() / 100 != parsedAmount) {
+      _snack('المبلغ لا يقبل أكثر من خانتين عشريتين.');
       return;
     }
     if (_method == 'حوالة' && _transferRefController.text.trim().isEmpty && targetStatus != ReceiptStatus.draft) {
@@ -841,7 +848,6 @@ class _CollectPageState extends State<CollectPage> {
 
   Future<void> _showVoucherModal(String previewSerial, ReceiptStatus targetStatus) async {
     bool isSubmitting = false;
-    // تثبيت الرصيد المتبقي قبل الحفظ لتجنب الخصم المزدوج
     final double remainingBeforeSave = _projectedRemaining;
 
     await showModalBottomSheet(
@@ -961,7 +967,10 @@ class _CollectPageState extends State<CollectPage> {
                             } catch (e) {
                               if (mounted) {
                                 setModalState(() => isSubmitting = false);
-                                _snack(e.toString());
+                                String msg = e.toString();
+                                if (e is ArgumentError) msg = e.message?.toString() ?? e.toString();
+                                if (e is ReceiptPersistenceException) msg = e.message;
+                                _snack(msg);
                               }
                             }
                           },
@@ -1049,7 +1058,8 @@ _تم توثيق السند داخل قاعدة بيانات المحطة الم
         const SizedBox(height: 12),
         const _FieldLabel('الصيدلية / العميل المستلم منه'),
         DropdownButtonFormField<String>(
-          initialValue: _selectedCode,
+          key: ValueKey(_selectedCode),
+          value: _selectedCode,
           isExpanded: true,
           decoration: const InputDecoration(
             prefixIcon: Icon(Icons.storefront_outlined),
@@ -1204,7 +1214,8 @@ _تم توثيق السند داخل قاعدة بيانات المحطة الم
         if (_method == 'حوالة') ...[
           const SizedBox(height: 12),
           DropdownButtonFormField<String>(
-            initialValue: _network,
+            key: ValueKey('network_$_network'),
+            value: _network,
             decoration: const InputDecoration(
               labelText: 'شبكة التحويل / الصرافة',
               filled: true,
@@ -1333,12 +1344,7 @@ class _HistoryPageState extends State<HistoryPage> {
             children: [
               _buildFilterChip('الكل (${widget.receipts.length})', null),
               const SizedBox(width: 8),
-              _buildFilterChip(
-                'معتمد محلياً (${widget.receipts.where((r) => r.status == ReceiptStatus.pending).length})',
-                ReceiptStatus.pending,
-              ),
-              const SizedBox(width: 8),
-              _buildFilterChip(
+                            _buildFilterChip(
                 'مسودات (${widget.receipts.where((r) => r.status == ReceiptStatus.draft).length})',
                 ReceiptStatus.draft,
               ),
@@ -1386,7 +1392,7 @@ class _HistoryPageState extends State<HistoryPage> {
 }
 
 // ============================================================================
-// 8. CASH DRAWER (TODAY'S SHIFT STRICT CUSTODY)
+// 8. CASH DRAWER
 // ============================================================================
 
 class CashDrawerPage extends StatelessWidget {
