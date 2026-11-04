@@ -5,6 +5,8 @@ import 'database_helper.dart';
 enum CurrencyType { yer, sar, usd }
 enum ReceiptStatus { draft, pending, posted }
 
+typedef CustomerRecord = Map<String, Object?>;
+
 class Receipt {
   final String number;
   final String customerCode;
@@ -68,13 +70,11 @@ class ReceiptRepository {
   ReceiptRepository({DatabaseHelper? helper})
       : _helper = helper ?? DatabaseHelper.instance;
 
-  String _dateKey([DateTime? date]) {
-    return DateFormat('yyMMdd').format(date ?? DateTime.now());
-  }
+  String _dateKey([DateTime? date]) =>
+      DateFormat('yyMMdd').format(date ?? DateTime.now());
 
-  String _serial(String distributorCode, String date, int counter) {
-    return 'DWK-$distributorCode-$date-${counter.toString().padLeft(4, '0')}';
-  }
+  String _serial(String distributorCode, String date, int counter) =>
+      'DWK-$distributorCode-$date-${counter.toString().padLeft(4, '0')}';
 
   String normalizeDigits(String input) {
     const arabic = ['٠', '١', '٢', '٣', '٤', '٥', '٦', '٧', '٨', '٩'];
@@ -88,17 +88,6 @@ class ReceiptRepository {
   Future<List<Receipt>> getReceipts() async {
     final db = await _helper.database;
     final rows = await db.query('receipts', orderBy: 'id DESC');
-    return rows.map(Receipt.fromDatabase).toList();
-  }
-
-  Future<List<Receipt>> getCustomerReceipts(String customerCode) async {
-    final db = await _helper.database;
-    final rows = await db.query(
-      'receipts',
-      where: 'customer_code = ?',
-      whereArgs: [customerCode],
-      orderBy: 'id DESC',
-    );
     return rows.map(Receipt.fromDatabase).toList();
   }
 
@@ -135,26 +124,16 @@ class ReceiptRepository {
     required ReceiptStatus status,
     String? fixedDraftNumber,
   }) async {
-    if (distributorCode.trim().isEmpty) {
-      throw ArgumentError('كود الموزع مطلوب.');
-    }
-    if (customerCode.trim().isEmpty || customerName.trim().isEmpty) {
-      throw ArgumentError('بيانات العميل غير مكتملة.');
-    }
-    if (!amount.isFinite || amount <= 0) {
-      throw ArgumentError('مبلغ السند غير صحيح.');
-    }
+    if (distributorCode.trim().isEmpty) throw ArgumentError('كود الموزع مطلوب.');
+    if (customerCode.trim().isEmpty) throw ArgumentError('بيانات العميل غير مكتملة.');
+    if (!amount.isFinite || amount <= 0) throw ArgumentError('مبلغ السند غير صحيح.');
     if ((amount * 100).roundToDouble() / 100 != amount) {
       throw ArgumentError('المبلغ لا يمكن أن يحتوي على أكثر من خانتين عشريتين.');
     }
-    if (method != 'نقداً' && method != 'حوالة') {
-      throw ArgumentError('طريقة القبض غير صحيحة.');
-    }
+    if (method != 'نقداً' && method != 'حوالة') throw ArgumentError('طريقة القبض غير صحيحة.');
 
-    final cleanTransferRef = transferRef != null ? normalizeDigits(transferRef) : null;
-    if (method == 'حوالة' &&
-        (cleanTransferRef == null || cleanTransferRef.isEmpty) &&
-        status != ReceiptStatus.draft) {
+    final cleanRef = transferRef != null ? normalizeDigits(transferRef) : null;
+    if (method == 'حوالة' && (cleanRef == null || cleanRef.isEmpty) && status != ReceiptStatus.draft) {
       throw ArgumentError('رقم إشعار الحوالة مطلوب.');
     }
 
@@ -189,10 +168,7 @@ class ReceiptRepository {
             limit: 1,
           );
 
-          final lastNumber = sequenceRows.isEmpty
-              ? 0
-              : (sequenceRows.first['last_number'] as int);
-
+          final lastNumber = sequenceRows.isEmpty ? 0 : (sequenceRows.first['last_number'] as int);
           final nextNumber = lastNumber + 1;
           receiptNumber = _serial(distributorCode, date, nextNumber);
 
@@ -220,7 +196,7 @@ class ReceiptRepository {
           currency: currency,
           method: method,
           network: method == 'حوالة' ? network : null,
-          transferRef: method == 'حوالة' ? cleanTransferRef : null,
+          transferRef: method == 'حوالة' ? cleanRef : null,
           note: note.trim(),
           status: status,
           createdAt: now,
@@ -254,7 +230,7 @@ class ReceiptRepository {
       final err = e.toString();
       if (e.isUniqueConstraintError() || err.contains('UNIQUE constraint failed')) {
         if (err.contains('receipts.transfer_ref') || err.contains('receipts.network')) {
-          throw ReceiptPersistenceException('رقم إشعار الحوالة ($cleanTransferRef) مسجل مسبقاً لشبكة ($network).');
+          throw ReceiptPersistenceException('رقم إشعار الحوالة ($cleanRef) مسجل مسبقاً لشبكة ($network).');
         }
         throw ReceiptPersistenceException('رقم السند مكرر في قاعدة البيانات.');
       }
@@ -262,7 +238,7 @@ class ReceiptRepository {
     }
   }
 
-  Future<void> saveCustomers(List> customers) async {
+  Future<void> saveCustomers(List<CustomerRecord> customers) async {
     final db = await _helper.database;
     await db.transaction((txn) async {
       for (final customer in customers) {
@@ -276,21 +252,6 @@ class ReceiptRepository {
         );
       }
     });
-  }
-
-  Future<double> getPendingTotal(String customerCode, CurrencyType currency) async {
-    final db = await _helper.database;
-    final result = await db.rawQuery(
-      '''
-      SELECT COALESCE(SUM(amount), 0) AS total
-      FROM receipts
-      WHERE customer_code = ?
-        AND currency = ?
-        AND status = 'pending'
-      ''',
-      [customerCode, currency.name],
-    );
-    return (result.first['total'] as num).toDouble();
   }
 
   Future<void> close() => _helper.close();
