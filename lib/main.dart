@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:intl/intl.dart' hide TextDirection;
@@ -35,6 +36,14 @@ extension CurrencyExtension on CurrencyType {
       case CurrencyType.usd: return 'دولار أمريكي';
     }
   }
+
+  String get subUnitLabel {
+    switch (this) {
+      case CurrencyType.yer: return 'فلس';
+      case CurrencyType.sar: return 'هللة';
+      case CurrencyType.usd: return 'سنت';
+    }
+  }
 }
 
 class Customer {
@@ -63,10 +72,18 @@ class Customer {
       case CurrencyType.usd: return bookBalanceUSD;
     }
   }
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is Customer && runtimeType == other.runtimeType && code == other.code;
+
+  @override
+  int get hashCode => code.hashCode;
 }
 
 class TafqeetEngine {
-  static const List<String> _onesMasculine = [
+  static const List<String> _ones = [
     '', 'واحد', 'اثنان', 'ثلاثة', 'أربعة', 'خمسة', 'ستة', 'سبعة', 'ثمانية', 'تسعة',
     'عشرة', 'أحد عشر', 'اثنا عشر', 'ثلاثة عشر', 'أربعة عشر', 'خمسة عشر', 'ستة عشر',
     'سبعة عشر', 'ثمانية عشر', 'تسعة عشر'
@@ -77,25 +94,31 @@ class TafqeetEngine {
   ];
 
   static const List<String> _hundreds = [
-    '', 'مائة', 'مئتان', 'ثلاثمائة', 'أربعمائة', 'خمسمائة', 'ستمائة', 'سبعمائة', 'ثمانمائة', 'تسعمائة'
+    '', 'مائة', 'مائتان', 'ثلاثمائة', 'أربعمائة', 'خمسمائة', 'ستمائة', 'سبعمائة', 'ثمانمائة', 'تسعمائة'
   ];
 
-  static String _convertThreeDigits(int n) {
+  static String _convertThreeDigits(int n, {bool isScaleOfNoun = false}) {
     if (n == 0) return '';
     String res = '';
     int h = n ~/ 100;
     int rem = n % 100;
 
-    if (h > 0) res += _hundreds[h];
+    if (h > 0) {
+      if (h == 2 && rem == 0 && isScaleOfNoun) {
+        res += 'مائتا';
+      } else {
+        res += _hundreds[h];
+      }
+    }
     if (rem > 0) {
       if (res.isNotEmpty) res += ' و';
       if (rem < 20) {
-        res += _onesMasculine[rem];
+        res += _ones[rem];
       } else {
         int t = rem ~/ 10;
         int u = rem % 10;
         if (u > 0) {
-          res += '${_onesMasculine[u]} و${_tens[t]}';
+          res += '${_ones[u]} و${_tens[t]}';
         } else {
           res += _tens[t];
         }
@@ -104,48 +127,57 @@ class TafqeetEngine {
     return res;
   }
 
-  static String convert(double amount, CurrencyType currency) {
-    int val = amount.toInt();
-    if (val <= 0) return 'صفر ${currency.label} لا غير';
+  static String _formatScale(int val, String singular, String dual, String plural, String accusative) {
+    if (val == 1) return singular;
+    if (val == 2) return dual;
+    int rem100 = val % 100;
+    if (rem100 >= 3 && rem100 <= 10) {
+      return '${_convertThreeDigits(val, isScaleOfNoun: true)} $plural';
+    }
+    return '${_convertThreeDigits(val, isScaleOfNoun: true)} $accusative';
+  }
 
-    int billions = val ~/ 1000000000;
-    int millions = (val % 1000000000) ~/ 1000000;
-    int thousands = (val % 1000000) ~/ 1000;
-    int remaining = val % 1000;
+  static String convert(double amount, CurrencyType currency) {
+    if (amount <= 0) return 'صفر ${currency.label} لا غير';
+
+    // منع أخطاء الكسور التقريبية وتثبيتها لخانتين
+    final double normalized = double.parse(amount.toStringAsFixed(2));
+    final int integerPart = normalized.floor();
+    final int decimalPart = ((normalized - integerPart) * 100).round();
+
+    int billions = integerPart ~/ 1000000000;
+    int millions = (integerPart % 1000000000) ~/ 1000000;
+    int thousands = (integerPart % 1000000) ~/ 1000;
+    int remaining = integerPart % 1000;
 
     List<String> parts = [];
 
     if (billions > 0) {
-      if (billions == 1) parts.add('مليار');
-      else if (billions == 2) parts.add('ملياران');
-      else if (billions >= 3 && billions <= 10) parts.add('${_convertThreeDigits(billions)} مليارات');
-      else parts.add('${_convertThreeDigits(billions)} مليار');
+      parts.add(_formatScale(billions, 'مليار', 'ملياران', 'مليارات', 'مليار'));
     }
-
     if (millions > 0) {
-      if (millions == 1) parts.add('مليون');
-      else if (millions == 2) parts.add('مليونان');
-      else if (millions >= 3 && millions <= 10) parts.add('${_convertThreeDigits(millions)} ملايين');
-      else parts.add('${_convertThreeDigits(millions)} مليون');
+      parts.add(_formatScale(millions, 'مليون', 'مليونان', 'ملايين', 'مليون'));
     }
-
     if (thousands > 0) {
-      if (thousands == 1) parts.add('ألف');
-      else if (thousands == 2) parts.add('ألفان');
-      else if (thousands >= 3 && thousands <= 10) parts.add('${_convertThreeDigits(thousands)} آلاف');
-      else parts.add('${_convertThreeDigits(thousands)} ألف');
+      parts.add(_formatScale(thousands, 'ألف', 'ألفان', 'آلاف', 'ألف'));
     }
-
     if (remaining > 0) {
       parts.add(_convertThreeDigits(remaining));
     }
 
-    return 'فقط ${parts.join(' و')} ${currency.label} لا غير';
+    String mainText = parts.isEmpty ? 'صفر' : parts.join(' و');
+    String result = 'فقط $mainText ${currency.label}';
+
+    if (decimalPart > 0) {
+      result += ' و${_convertThreeDigits(decimalPart)} ${currency.subUnitLabel}';
+    }
+
+    return '$result لا غير';
   }
 }
 
 // ============================================================================
-// 2. THEME & APP ENTRY POINT
+// 2. THEME & UTILITIES
 // ============================================================================
 
 const navy = Color(0xFF0F243E);
@@ -161,6 +193,15 @@ const borderCol = Color(0xFFE2E8F0);
 String _fmt(num n) {
   final formatter = NumberFormat('#,##0.##', 'en_US');
   return formatter.format(n);
+}
+
+String _normalizeDigits(String input) {
+  const arabic = ['٠', '١', '٢', '٣', '٤', '٥', '٦', '٧', '٨', '٩', '٫'];
+  const english = ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '.'];
+  for (int i = 0; i < arabic.length; i++) {
+    input = input.replaceAll(arabic[i], english[i]);
+  }
+  return input.replaceAll(',', '').trim();
 }
 
 class DawacomCollectorApp extends StatelessWidget {
@@ -183,7 +224,7 @@ class DawacomCollectorApp extends StatelessWidget {
 }
 
 // ============================================================================
-// 3. MAIN SHELL & DATABASE INITIALIZATION
+// 3. MAIN SHELL
 // ============================================================================
 
 class CollectorShell extends StatefulWidget {
@@ -256,7 +297,6 @@ class _CollectorShellState extends State<CollectorShell> {
     _initDatabaseAndLoad();
   }
 
-  /// تهيئة جدول العملاء في SQLite إذا كان فارغاً ثم قراءة السجلات
   Future<void> _initDatabaseAndLoad() async {
     try {
       final db = await DatabaseHelper.instance.database;
@@ -264,7 +304,8 @@ class _CollectorShellState extends State<CollectorShell> {
         await db.rawQuery('SELECT COUNT(*) FROM customers'),
       ) ?? 0;
 
-      if (count == 0) {
+      // حقن البيانات التجريبية في وضع التطوير فقط إن كان الجدول فارغاً
+      if (count == 0 && kDebugMode) {
         await _repository.saveCustomers(
           _seedCustomers.map((c) => {
             'code': c.code,
@@ -318,7 +359,6 @@ class _CollectorShellState extends State<CollectorShell> {
     }
   }
 
-  /// احتساب السندات المحلية المعلقة فقط (pending) لمنع الازدواج المحاسبي
   double _getPendingTotal(String customerCode, CurrencyType currency) {
     return _receipts
         .where((r) => r.customerCode == customerCode && r.currency == currency && r.status == ReceiptStatus.pending)
@@ -337,9 +377,7 @@ class _CollectorShellState extends State<CollectorShell> {
       return const Directionality(
         textDirection: TextDirection.rtl,
         child: Scaffold(
-          body: Center(
-            child: CircularProgressIndicator(color: blue),
-          ),
+          body: Center(child: CircularProgressIndicator(color: blue)),
         ),
       );
     }
@@ -405,7 +443,7 @@ class _CollectorShellState extends State<CollectorShell> {
         bottomNavigationBar: NavigationBar(
           height: 70,
           backgroundColor: Colors.white,
-          indicatorColor: blue.withOpacity(0.12),
+          indicatorColor: blue.withAlpha(31),
           selectedIndex: _selectedIndex,
           onDestinationSelected: (i) => setState(() => _selectedIndex = i),
           destinations: const [
@@ -498,7 +536,7 @@ class DashboardPage extends StatelessWidget {
             ),
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-              decoration: BoxDecoration(color: green.withOpacity(0.12), borderRadius: BorderRadius.circular(8)),
+              decoration: BoxDecoration(color: green.withAlpha(31), borderRadius: BorderRadius.circular(8)),
               child: const Text('المرحلة 1: محلي (SQLite)',
                   style: TextStyle(color: green, fontSize: 11, fontWeight: FontWeight.bold)),
             ),
@@ -514,7 +552,7 @@ class DashboardPage extends StatelessWidget {
               end: Alignment.bottomLeft,
             ),
             borderRadius: BorderRadius.circular(20),
-            boxShadow: [BoxShadow(color: navy.withOpacity(0.2), blurRadius: 16, offset: const Offset(0, 6))],
+            boxShadow: [BoxShadow(color: navy.withAlpha(51), blurRadius: 16, offset: const Offset(0, 6))],
           ),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -539,7 +577,7 @@ class DashboardPage extends StatelessWidget {
                 children: [
                   const Icon(Icons.storage_rounded, size: 14, color: Colors.white70),
                   const SizedBox(width: 6),
-                  const Text('قاعدة بيانات SQLite محلية مؤمنة', style: TextStyle(color: Colors.white70, fontSize: 11)),
+                  const Text('قاعدة بيانات SQLite محلية', style: TextStyle(color: Colors.white70, fontSize: 11)),
                   const Spacer(),
                   Text(DateFormat('yyyy/MM/dd').format(DateTime.now()),
                       style: const TextStyle(color: Colors.white70, fontSize: 11)),
@@ -709,7 +747,7 @@ class _CustomersPageState extends State<CustomersPage> {
 }
 
 // ============================================================================
-// 6. OFFICIAL RECEIPT ENTRY (ATOMIC SQLITE ISSUE)
+// 6. OFFICIAL RECEIPT ENTRY (FIXED DROPDOWN & PREVIEW MATCHING)
 // ============================================================================
 
 class CollectPage extends StatefulWidget {
@@ -735,7 +773,8 @@ class _CollectPageState extends State<CollectPage> {
   final _noteController = TextEditingController();
   final _transferRefController = TextEditingController();
 
-  Customer? _selected;
+  // تخزين الكود فقط لمنع انهيار الـ Dropdown بعد التحديث
+  String? _selectedCode;
   CurrencyType _currency = CurrencyType.yer;
   String _method = 'نقداً';
   String _network = 'الكريمي';
@@ -743,11 +782,13 @@ class _CollectPageState extends State<CollectPage> {
 
   final List<String> _networks = ['الكريمي', 'النجم', 'الامتياز', 'يمن إكسبرس', 'المريسي', 'أخرى'];
 
-  double get _amount => double.tryParse(_amountController.text.replaceAll(',', '').trim()) ?? 0;
+  Customer? get _selected =>
+      widget.customers.where((c) => c.code == _selectedCode).firstOrNull;
+
+  double get _amount => double.tryParse(_normalizeDigits(_amountController.text)) ?? 0;
 
   double get _customerBookBalance => _selected?.getBookBalance(_currency) ?? 0.0;
 
-  /// يخصم السندات المعلقة محلياً فقط (pending) من الرصيد الدفتري
   double get _customerPendingTotal {
     if (_selected == null) return 0.0;
     return widget.receipts
@@ -800,6 +841,8 @@ class _CollectPageState extends State<CollectPage> {
 
   Future<void> _showVoucherModal(String previewSerial, ReceiptStatus targetStatus) async {
     bool isSubmitting = false;
+    // تثبيت الرصيد المتبقي قبل الحفظ لتجنب الخصم المزدوج
+    final double remainingBeforeSave = _projectedRemaining;
 
     await showModalBottomSheet(
       context: context,
@@ -870,7 +913,7 @@ class _CollectPageState extends State<CollectPage> {
                           ),
                         ),
                         const Divider(height: 16, color: borderCol),
-                        _rowKV('الرصيد المتبقي التقديري', '${_fmt(_projectedRemaining)} ${_currency.code}',
+                        _rowKV('الرصيد المتبقي التقديري', '${_fmt(remainingBeforeSave)} ${_currency.code}',
                             color: green, bold: true),
                       ],
                     ),
@@ -883,7 +926,6 @@ class _CollectPageState extends State<CollectPage> {
                             setModalState(() => isSubmitting = true);
 
                             try {
-                              // عملية ذرية متكاملة داخل معاملة SQLite واحدة
                               final savedReceipt = await widget.repository.issueAndSaveReceipt(
                                 distributorCode: '1001',
                                 customerCode: _selected!.code,
@@ -895,6 +937,7 @@ class _CollectPageState extends State<CollectPage> {
                                 transferRef: _method == 'حوالة' ? _transferRefController.text.trim() : null,
                                 note: _noteController.text.trim(),
                                 status: targetStatus,
+                                fixedDraftNumber: targetStatus == ReceiptStatus.draft ? previewSerial : null,
                               );
 
                               await widget.onReceiptSaved(savedReceipt);
@@ -903,15 +946,22 @@ class _CollectPageState extends State<CollectPage> {
                               if (!ctx.mounted) return;
                               Navigator.pop(ctx);
 
-                              _copyWhatsAppVoucher(savedReceipt, _projectedRemaining);
+                              if (savedReceipt.status != ReceiptStatus.draft) {
+                                _copyWhatsAppVoucher(savedReceipt, remainingBeforeSave);
+                              } else {
+                                _snack('تم حفظ المسودة بنجاح في قاعدة البيانات.');
+                              }
 
+                              setState(() {
+                                _selectedCode = null;
+                              });
                               _amountController.clear();
                               _noteController.clear();
                               _transferRefController.clear();
                             } catch (e) {
                               if (mounted) {
                                 setModalState(() => isSubmitting = false);
-                                _snack('خطأ أثناء حفظ السند في SQLite: $e');
+                                _snack(e.toString());
                               }
                             }
                           },
@@ -951,6 +1001,8 @@ class _CollectPageState extends State<CollectPage> {
   }
 
   void _copyWhatsAppVoucher(Receipt r, double remaining) {
+    if (r.status == ReceiptStatus.draft) return;
+
     final text = '''
 *محلات دواكم للأدوية والمستلزمات*
 📄 *إشعار سند تحصيل ميداني*
@@ -996,8 +1048,8 @@ _تم توثيق السند داخل قاعدة بيانات المحطة الم
         const _PageHeader(title: 'تسجيل سند قبض', subtitle: 'إصدار سند تحصيل نقد أو حوالة متوافق مع سوق الأدوية'),
         const SizedBox(height: 12),
         const _FieldLabel('الصيدلية / العميل المستلم منه'),
-        DropdownButtonFormField<Customer>(
-          value: _selected,
+        DropdownButtonFormField<String>(
+          initialValue: _selectedCode,
           isExpanded: true,
           decoration: const InputDecoration(
             prefixIcon: Icon(Icons.storefront_outlined),
@@ -1010,9 +1062,9 @@ _تم توثيق السند داخل قاعدة بيانات المحطة الم
             ),
           ),
           items: widget.customers
-              .map((c) => DropdownMenuItem(value: c, child: Text('${c.name} (${c.code})')))
+              .map((c) => DropdownMenuItem(value: c.code, child: Text('${c.name} (${c.code})')))
               .toList(),
-          onChanged: (c) => setState(() => _selected = c),
+          onChanged: (code) => setState(() => _selectedCode = code),
         ),
         const SizedBox(height: 14),
         const _FieldLabel('عملة السند'),
@@ -1091,8 +1143,7 @@ _تم توثيق السند داخل قاعدة بيانات المحطة الم
         const _FieldLabel('مبلغ التحصيل'),
         TextField(
           controller: _amountController,
-          keyboardType: TextInputType.number,
-          inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+          keyboardType: const TextInputType.numberWithOptions(decimal: true),
           onChanged: (_) => setState(() {}),
           style: const TextStyle(fontSize: 24, fontWeight: FontWeight.w900, color: ink),
           decoration: InputDecoration(
@@ -1153,7 +1204,7 @@ _تم توثيق السند داخل قاعدة بيانات المحطة الم
         if (_method == 'حوالة') ...[
           const SizedBox(height: 12),
           DropdownButtonFormField<String>(
-            value: _network,
+            initialValue: _network,
             decoration: const InputDecoration(
               labelText: 'شبكة التحويل / الصرافة',
               filled: true,
@@ -1323,7 +1374,7 @@ class _HistoryPageState extends State<HistoryPage> {
       label: Text(label),
       selected: active,
       onSelected: (_) => setState(() => _filter = status),
-      selectedColor: blue.withOpacity(0.15),
+      selectedColor: blue.withAlpha(38),
       checkmarkColor: blue,
       labelStyle: TextStyle(
         color: active ? blue : ink,
@@ -1358,7 +1409,6 @@ class CashDrawerPage extends StatelessWidget {
     final cashUSD = todayReceipts
         .where((r) => r.currency == CurrencyType.usd && r.method == 'نقداً')
         .fold(0.0, (s, r) => s + r.amount);
-
 
     final transYER = todayReceipts
         .where((r) => r.currency == CurrencyType.yer && r.method == 'حوالة')
@@ -1461,7 +1511,7 @@ class CashDrawerPage extends StatelessWidget {
         border: Border.all(color: borderCol),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withOpacity(0.02),
+            color: Colors.black.withAlpha(5),
             blurRadius: 10,
             offset: const Offset(0, 3),
           ),
@@ -1476,7 +1526,7 @@ class CashDrawerPage extends StatelessWidget {
               Container(
                 padding: const EdgeInsets.all(10),
                 decoration: BoxDecoration(
-                  color: headerColor.withOpacity(0.12),
+                  color: headerColor.withAlpha(31),
                   borderRadius: BorderRadius.circular(12),
                 ),
                 child: Icon(icon, color: headerColor, size: 22),
@@ -1572,7 +1622,7 @@ class CustomerStatementSheet extends StatelessWidget {
                   width: 44,
                   height: 44,
                   decoration: BoxDecoration(
-                    color: blue.withOpacity(0.1),
+                    color: blue.withAlpha(26),
                     borderRadius: BorderRadius.circular(12),
                   ),
                   child: const Icon(Icons.storefront_rounded, color: blue, size: 24),
@@ -1711,7 +1761,7 @@ class _StatCard extends StatelessWidget {
         border: Border.all(color: borderCol),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withOpacity(0.02),
+            color: Colors.black.withAlpha(5),
             blurRadius: 8,
             offset: const Offset(0, 2),
           ),
@@ -1726,7 +1776,7 @@ class _StatCard extends StatelessWidget {
               Container(
                 padding: const EdgeInsets.all(8),
                 decoration: BoxDecoration(
-                  color: color.withOpacity(0.12),
+                  color: color.withAlpha(31),
                   borderRadius: BorderRadius.circular(10),
                 ),
                 child: Icon(icon, color: color, size: 20),
@@ -1855,7 +1905,7 @@ class ReceiptTile extends StatelessWidget {
             width: 42,
             height: 42,
             decoration: BoxDecoration(
-              color: (receipt.method == 'نقداً' ? green : blue).withOpacity(0.12),
+              color: (receipt.method == 'نقداً' ? green : blue).withAlpha(31),
               borderRadius: BorderRadius.circular(12),
             ),
             child: Icon(
@@ -1881,7 +1931,7 @@ class ReceiptTile extends StatelessWidget {
                     Container(
                       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
                       decoration: BoxDecoration(
-                        color: statusColor.withOpacity(0.12),
+                        color: statusColor.withAlpha(31),
                         borderRadius: BorderRadius.circular(6),
                       ),
                       child: Text(
@@ -1954,7 +2004,7 @@ class CustomerTile extends StatelessWidget {
               width: 44,
               height: 44,
               decoration: BoxDecoration(
-                color: blue.withOpacity(0.08),
+                color: blue.withAlpha(20),
                 borderRadius: BorderRadius.circular(12),
               ),
               child: const Icon(Icons.storefront_outlined, color: blue, size: 22),
