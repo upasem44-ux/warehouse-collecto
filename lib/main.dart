@@ -1815,3 +1815,986 @@ class _CollectPageState extends State<CollectPage> {
                         Navigator.pop(ctx, c);
                       },
                    
+                    );
+                  },
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+
+    if (chosen != null && mounted) {
+      setState(() => selectedCustomer = chosen);
+    }
+  }
+
+  Future<void> saveReceipt() async {
+    if (saving) return;
+
+    if (!formKey.currentState!.validate()) return;
+
+    if (selectedCustomer == null) {
+      showMsg('اختر العميل أولاً', error: true);
+      return;
+    }
+
+    if (method == 'حوالة' &&
+        transferController.text.trim().isEmpty) {
+      showMsg('أدخل رقم الحوالة', error: true);
+      return;
+    }
+
+    final amount = double.tryParse(
+      amountController.text.trim(),
+    );
+
+    if (amount == null || !amount.isFinite || amount <= 0) {
+      showMsg('أدخل مبلغاً صحيحاً', error: true);
+      return;
+    }
+
+    setState(() => saving = true);
+
+    try {
+      final receipt = await dbRepo.saveReceipt(
+        customer: selectedCustomer!,
+        amount: amount,
+        currency: currency,
+        method: method,
+        network: method == 'حوالة' ? network : null,
+        transferRef: method == 'حوالة'
+            ? transferController.text.trim()
+            : null,
+        note: noteController.text.trim().isEmpty
+            ? null
+            : noteController.text.trim(),
+      );
+
+      if (!mounted) return;
+
+      amountController.clear();
+      transferController.clear();
+      noteController.clear();
+
+      setState(() {
+        selectedCustomer = null;
+        currency = CurrencyType.yer;
+        method = 'نقد';
+        network = 'الكريمي';
+        saving = false;
+      });
+
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (ctx) => AlertDialog(
+          icon: const Icon(
+            Icons.check_circle,
+            color: AppColors.green,
+            size: 50,
+          ),
+          title: const Text('تم إصدار سند القبض'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text('رقم السند'),
+              const SizedBox(height: 8),
+              SelectableText(
+                receipt.number,
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                  color: AppColors.navy,
+                  fontWeight: FontWeight.bold,
+                  fontSize: 16,
+                ),
+              ),
+              const Divider(height: 25),
+              Text(
+                receipt.customerName,
+                style: const TextStyle(
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              const SizedBox(height: 7),
+              Text(
+                '${money(receipt.amount)} ${currencyShort(receipt.currency)}',
+                style: const TextStyle(
+                  fontSize: 21,
+                  fontWeight: FontWeight.bold,
+                  color: AppColors.green,
+                ),
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                'تم الحفظ محلياً على الجهاز، وينتظر الترحيل المركزي.',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontSize: 11,
+                  color: AppColors.muted,
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            FilledButton(
+              style: FilledButton.styleFrom(
+                backgroundColor: AppColors.navy,
+              ),
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('تم'),
+            ),
+          ],
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+
+      setState(() => saving = false);
+
+      showMsg(
+        'تعذر حفظ السند: $e',
+        error: true,
+      );
+    }
+  }
+
+  Widget buildCustomerSelector() {
+    return InkWell(
+      onTap: pickCustomer,
+      borderRadius: BorderRadius.circular(13),
+      child: Container(
+        padding: const EdgeInsets.all(15),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          border: Border.all(color: AppColors.border),
+          borderRadius: BorderRadius.circular(13),
+        ),
+        child: Row(
+          children: [
+            const Icon(
+              Icons.storefront_outlined,
+              color: AppColors.navy,
+              size: 25,
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    selectedCustomer?.name ?? 'اختر العميل',
+                    style: const TextStyle(
+                      fontWeight: FontWeight.bold,
+                      color: AppColors.text,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    selectedCustomer == null
+                        ? 'اضغط لتحديد العميل المستلم للتحصيل'
+                        : '${selectedCustomer!.code} • ${selectedCustomer!.area}',
+                    style: const TextStyle(
+                      color: AppColors.muted,
+                      fontSize: 11,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const Icon(
+              Icons.keyboard_arrow_down,
+              color: AppColors.muted,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Form(
+      key: formKey,
+      child: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          const SectionTitle(
+            title: 'تسجيل سند قبض جديد',
+            subtitle: 'أدخل بيانات التحصيل بدقة قبل الحفظ',
+          ),
+
+          buildCustomerSelector(),
+
+          const SizedBox(height: 18),
+
+          const Text(
+            'مبلغ التحصيل',
+            style: TextStyle(
+              fontWeight: FontWeight.bold,
+              color: AppColors.text,
+            ),
+          ),
+
+          const SizedBox(height: 9),
+
+          TextFormField(
+            controller: amountController,
+            keyboardType: const TextInputType.numberWithOptions(
+              decimal: true,
+            ),
+            inputFormatters: [
+              FilteringTextInputFormatter.allow(
+                RegExp(r'[0-9.]'),
+              ),
+            ],
+            style: const TextStyle(
+              fontSize: 23,
+              fontWeight: FontWeight.bold,
+              color: AppColors.navy,
+            ),
+            decoration: const InputDecoration(
+              hintText: '0.00',
+              prefixIcon: Icon(Icons.payments_outlined),
+            ),
+            validator: (value) {
+              final amount = double.tryParse(
+                value?.trim() ?? '',
+              );
+
+              if (amount == null ||
+                  !amount.isFinite ||
+                  amount <= 0) {
+                return 'أدخل مبلغاً صحيحاً أكبر من صفر';
+              }
+
+              if ((amount * 100 -
+                      (amount * 100).round())
+                  .abs() > 0.000001) {
+                return 'الحد الأقصى منزلتان عشريتان';
+              }
+
+              return null;
+            },
+          ),
+
+          const SizedBox(height: 17),
+
+          const Text(
+            'عملة التحصيل',
+            style: TextStyle(
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+
+          const SizedBox(height: 8),
+
+          DropdownButtonFormField<CurrencyType>(
+            value: currency,
+            decoration: const InputDecoration(
+              prefixIcon: Icon(Icons.currency_exchange),
+            ),
+            items: CurrencyType.values.map((item) {
+              return DropdownMenuItem(
+                value: item,
+                child: Text(currencyName(item)),
+              );
+            }).toList(),
+            onChanged: (value) {
+              if (value != null) {
+                setState(() => currency = value);
+              }
+            },
+          ),
+
+          const SizedBox(height: 17),
+
+          const Text(
+            'طريقة التحصيل',
+            style: TextStyle(
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+
+          const SizedBox(height: 8),
+
+          SegmentedButton<String>(
+            segments: const [
+              ButtonSegment(
+                value: 'نقد',
+                label: Text('نقد'),
+                icon: Icon(Icons.money),
+              ),
+              ButtonSegment(
+                value: 'حوالة',
+                label: Text('حوالة'),
+                icon: Icon(Icons.account_balance),
+              ),
+            ],
+            selected: {method},
+            onSelectionChanged: (value) {
+              setState(() => method = value.first);
+            },
+          ),
+
+          if (method == 'حوالة') ...[
+            const SizedBox(height: 17),
+
+            DropdownButtonFormField<String>(
+              value: network,
+              decoration: const InputDecoration(
+                labelText: 'شبكة التحويل',
+                prefixIcon: Icon(Icons.account_balance_wallet),
+              ),
+              items: networks.map((item) {
+                return DropdownMenuItem(
+                  value: item,
+                  child: Text(item),
+                );
+              }).toList(),
+              onChanged: (value) {
+                if (value != null) {
+                  setState(() => network = value);
+                }
+              },
+            ),
+
+            const SizedBox(height: 12),
+
+            TextFormField(
+              controller: transferController,
+              decoration: const InputDecoration(
+                labelText: 'رقم الحوالة',
+                prefixIcon: Icon(Icons.confirmation_number),
+              ),
+              validator: (value) {
+                if (method == 'حوالة' &&
+                    (value == null ||
+                        value.trim().isEmpty)) {
+                  return 'رقم الحوالة مطلوب';
+                }
+
+                return null;
+              },
+            ),
+          ],
+
+          const SizedBox(height: 17),
+
+          TextFormField(
+            controller: noteController,
+            maxLines: 3,
+            decoration: const InputDecoration(
+              labelText: 'ملاحظات (اختياري)',
+              alignLabelWithHint: true,
+              prefixIcon: Icon(Icons.notes),
+            ),
+          ),
+
+          const SizedBox(height: 22),
+
+          SizedBox(
+            height: 53,
+            child: FilledButton.icon(
+              style: FilledButton.styleFrom(
+                backgroundColor: AppColors.navy,
+                foregroundColor: Colors.white,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(13),
+                ),
+              ),
+              onPressed: saving ? null : saveReceipt,
+              icon: saving
+                  ? const SizedBox(
+                      width: 19,
+                      height: 19,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: Colors.white,
+                      ),
+                    )
+                  : const Icon(Icons.save_outlined),
+              label: Text(
+                saving ? 'جارٍ حفظ السند...' : 'حفظ وإصدار سند القبض',
+                style: const TextStyle(
+                  fontWeight: FontWeight.bold,
+                  fontSize: 14,
+                ),
+              ),
+            ),
+          ),
+
+          const SizedBox(height: 15),
+
+          const Text(
+            'تنبيه: إصدار السند يحفظه محلياً فقط، ولا يغير رصيد العميل المركزي حتى تتم المزامنة والاعتماد.',
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              color: AppColors.muted,
+              fontSize: 11,
+              height: 1.7,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ============================================================
+// 13. سجل السندات
+// ============================================================
+
+class HistoryPage extends StatefulWidget {
+  const HistoryPage({super.key});
+
+  @override
+  State<HistoryPage> createState() => _HistoryPageState();
+}
+
+class _HistoryPageState extends State<HistoryPage> {
+  late Future<List<ReceiptModel>> future;
+
+  String filter = 'الكل';
+
+  @override
+  void initState() {
+    super.initState();
+    future = dbRepo.getReceipts(limit: 2000);
+  }
+
+  Future<void> reload() async {
+    setState(() {
+      future = dbRepo.getReceipts(limit: 2000);
+    });
+
+    await future;
+  }
+
+  void showReceiptDetails(ReceiptModel receipt) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('تفاصيل سند القبض'),
+        content: SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              _detail('رقم السند', receipt.number),
+              _detail('العميل', receipt.customerName),
+              _detail('كود العميل', receipt.customerCode),
+              _detail(
+                'المبلغ',
+                '${money(receipt.amount)} ${currencyShort(receipt.currency)}',
+              ),
+              _detail('الطريقة', receipt.method),
+              if (receipt.network != null)
+                _detail('الشبكة', receipt.network!),
+              if (receipt.transferRef != null)
+                _detail('رقم الحوالة', receipt.transferRef!),
+              _detail('التاريخ', formatDate(receipt.createdAt)),
+              _detail('الحالة', statusArabic(receipt.status)),
+              _detail(
+                'حالة المزامنة',
+                receipt.syncStatus == 'pending'
+                    ? 'بانتظار المزامنة'
+                    : receipt.syncStatus == 'failed'
+                        ? 'فشلت المزامنة'
+                        : 'تمت المزامنة',
+              ),
+              if (receipt.note != null &&
+                  receipt.note!.isNotEmpty)
+                _detail('ملاحظات', receipt.note!),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('إغلاق'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _detail(String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 7),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 105,
+            child: Text(
+              label,
+              style: const TextStyle(
+                color: AppColors.muted,
+                fontSize: 12,
+              ),
+            ),
+          ),
+          Expanded(
+            child: SelectableText(
+              value,
+              style: const TextStyle(
+                color: AppColors.text,
+                fontSize: 12,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return RefreshIndicator(
+      onRefresh: reload,
+      child: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(14, 14, 14, 8),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const SectionTitle(
+                  title: 'سجل سندات القبض',
+                  subtitle: 'جميع السندات المحفوظة على هذا الجهاز',
+                ),
+                SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  child: Row(
+                    children: [
+                      for (final item in [
+                        'الكل',
+                        'نقد',
+                        'حوالة',
+                        'بانتظار المزامنة',
+                      ])
+                        Padding(
+                          padding: const EdgeInsets.only(left: 7),
+                          child: ChoiceChip(
+                            label: Text(item),
+                            selected: filter == item,
+                            onSelected: (_) {
+                              setState(() => filter = item);
+                            },
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Expanded(
+            child: FutureBuilder<List<ReceiptModel>>(
+              future: future,
+              builder: (context, snapshot) {
+                if (snapshot.connectionState ==
+                    ConnectionState.waiting) {
+                  return const Center(
+                    child: CircularProgressIndicator(),
+                  );
+                }
+
+                if (snapshot.hasError) {
+                  return EmptyState(
+                    title: 'تعذر تحميل السندات',
+                    subtitle: '${snapshot.error}',
+                  );
+                }
+
+                final all = snapshot.data ?? [];
+
+                final receipts = all.where((r) {
+                  switch (filter) {
+                    case 'نقد':
+                      return r.method == 'نقد';
+                    case 'حوالة':
+                      return r.method == 'حوالة';
+                    case 'بانتظار المزامنة':
+                      return r.syncStatus == 'pending' ||
+                          r.syncStatus == 'failed';
+                    default:
+                      return true;
+                  }
+                }).toList();
+
+                if (receipts.isEmpty) {
+                  return const EmptyState(
+                    title: 'لا توجد سندات',
+                    subtitle: 'لا توجد نتائج ضمن هذا التصنيف.',
+                    icon: Icons.receipt_long_outlined,
+                  );
+                }
+
+                return ListView.builder(
+                  padding: const EdgeInsets.fromLTRB(14, 5, 14, 20),
+                  itemCount: receipts.length,
+                  itemBuilder: (context, index) {
+                    final r = receipts[index];
+
+                    final isTransfer = r.method == 'حوالة';
+
+                    return Card(
+                      elevation: 0,
+                      margin: const EdgeInsets.only(bottom: 9),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(13),
+                        side: const BorderSide(
+                          color: AppColors.border,
+                        ),
+                      ),
+                      child: ListTile(
+                        onTap: () => showReceiptDetails(r),
+                        leading: CircleAvatar(
+                          backgroundColor:
+                              (isTransfer
+                                      ? AppColors.orange
+                                      : AppColors.green)
+                                  .withOpacity(0.12),
+                          child: Icon(
+                            isTransfer
+                                ? Icons.account_balance
+                                : Icons.payments,
+                            color: isTransfer
+                                ? AppColors.orange
+                                : AppColors.green,
+                          ),
+                        ),
+                        title: Text(
+                          r.customerName,
+                          style: const TextStyle(
+                            fontWeight: FontWeight.bold,
+                            fontSize: 13,
+                          ),
+                        ),
+                        subtitle: Text(
+                          '${r.number}\n${formatDate(r.createdAt)}',
+                          style: const TextStyle(fontSize: 10),
+                        ),
+                        isThreeLine: true,
+                        trailing: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          crossAxisAlignment: CrossAxisAlignment.end,
+                          children: [
+                            Text(
+                              '${money(r.amount)} ${currencyShort(r.currency)}',
+                              style: const TextStyle(
+                                color: AppColors.navy,
+                                fontWeight: FontWeight.bold,
+                                fontSize: 12,
+                              ),
+                            ),
+                            const SizedBox(height: 5),
+                            const Text(
+                              'بانتظار المزامنة',
+                              style: TextStyle(
+                                color: AppColors.orange,
+                                fontSize: 9,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    );
+                  },
+                );
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ============================================================
+// 14. صندوق العهدة
+// ============================================================
+
+class CashDrawerPage extends StatefulWidget {
+  const CashDrawerPage({super.key});
+
+  @override
+  State<CashDrawerPage> createState() => _CashDrawerPageState();
+}
+
+class _CashDrawerPageState extends State<CashDrawerPage> {
+  late Future<_DrawerData> future;
+
+  @override
+  void initState() {
+    super.initState();
+    future = loadDrawer();
+  }
+
+  Future<_DrawerData> loadDrawer() async {
+    final receipts = await dbRepo.getReceipts(limit: 10000);
+
+    final today = DateFormat('yyyyMMdd').format(DateTime.now());
+
+    final todayReceipts = receipts.where((r) {
+      return DateFormat('yyyyMMdd').format(r.createdAt) == today;
+    }).toList();
+
+    final cash = <String, double>{
+      'yer': 0,
+      'sar': 0,
+      'usd': 0,
+    };
+
+    final transfers = <String, double>{
+      'yer': 0,
+      'sar': 0,
+      'usd': 0,
+    };
+
+    for (final receipt in todayReceipts) {
+      final key = receipt.currency.name;
+
+      if (receipt.method == 'نقد') {
+        cash[key] = (cash[key] ?? 0) + receipt.amount;
+      } else if (receipt.method == 'حوالة') {
+        transfers[key] =
+            (transfers[key] ?? 0) + receipt.amount;
+      }
+    }
+
+    return _DrawerData(
+      receiptsCount: todayReceipts.length,
+      cash: cash,
+      transfers: transfers,
+    );
+  }
+
+  Future<void> reload() async {
+    setState(() => future = loadDrawer());
+    await future;
+  }
+
+  Widget totalRow(
+    String title,
+    double value,
+    String symbol,
+  ) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 10),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              title,
+              style: const TextStyle(
+                color: AppColors.text,
+                fontSize: 13,
+              ),
+            ),
+          ),
+          Text(
+            '${money(value)} $symbol',
+            style: const TextStyle(
+              fontWeight: FontWeight.bold,
+              color: AppColors.navy,
+              fontSize: 14,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget drawerCard({
+    required String title,
+    required IconData icon,
+    required Color color,
+    required Map<String, double> totals,
+  }) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(15),
+        border: Border.all(color: AppColors.border),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(icon, color: color),
+              const SizedBox(width: 9),
+              Text(
+                title,
+                style: const TextStyle(
+                  fontWeight: FontWeight.bold,
+                  fontSize: 15,
+                  color: AppColors.navy,
+                ),
+              ),
+            ],
+          ),
+          const Divider(height: 25),
+          totalRow(
+            'الريال اليمني',
+            totals['yer'] ?? 0,
+            'ر.ي',
+          ),
+          totalRow(
+            'الريال السعودي',
+            totals['sar'] ?? 0,
+            'ر.س',
+          ),
+          totalRow(
+            'الدولار الأمريكي',
+            totals['usd'] ?? 0,
+            '\$',
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return RefreshIndicator(
+      onRefresh: reload,
+      child: FutureBuilder<_DrawerData>(
+        future: future,
+        builder: (context, snapshot) {
+          if (snapshot.connectionState ==
+              ConnectionState.waiting) {
+            return const Center(
+              child: CircularProgressIndicator(),
+            );
+          }
+
+          if (snapshot.hasError) {
+            return EmptyState(
+              title: 'تعذر تحميل صندوق العهدة',
+              subtitle: '${snapshot.error}',
+            );
+          }
+
+          final data = snapshot.data!;
+
+          return ListView(
+            padding: const EdgeInsets.all(16),
+            children: [
+              const SectionTitle(
+                title: 'صندوق العهدة اليومي',
+                subtitle: 'ملخص التحصيلات المسجلة خلال اليوم',
+              ),
+
+              Container(
+                padding: const EdgeInsets.all(17),
+                decoration: BoxDecoration(
+                  color: AppColors.navy,
+                  borderRadius: BorderRadius.circular(15),
+                ),
+                child: Row(
+                  children: [
+                    const Icon(
+                      Icons.receipt_long,
+                      color: AppColors.gold,
+                      size: 35,
+                    ),
+                    const SizedBox(width: 13),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text(
+                            'عدد سندات اليوم',
+                            style: TextStyle(
+                              color: Colors.white70,
+                              fontSize: 12,
+                            ),
+                          ),
+                          const SizedBox(height: 5),
+                          Text(
+                            '${data.receiptsCount}',
+                            style: const TextStyle(
+                              color: AppColors.gold,
+                              fontWeight: FontWeight.bold,
+                              fontSize: 25,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    Text(
+                      DateFormat('yyyy/MM/dd').format(DateTime.now()),
+                      style: const TextStyle(
+                        color: Colors.white70,
+                        fontSize: 11,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+
+              const SizedBox(height: 20),
+
+              drawerCard(
+                title: 'التحصيل النقدي',
+                icon: Icons.payments_outlined,
+                color: AppColors.green,
+                totals: data.cash,
+              ),
+
+              const SizedBox(height: 15),
+
+              drawerCard(
+                title: 'تحصيلات الحوالات',
+                icon: Icons.account_balance_outlined,
+                color: AppColors.orange,
+                totals: data.transfers,
+              ),
+
+              const SizedBox(height: 20),
+
+              const Text(
+                'ملاحظة محاسبية',
+                style: TextStyle(
+                  fontWeight: FontWeight.bold,
+                  color: AppColors.navy,
+                ),
+              ),
+
+              const SizedBox(height: 7),
+
+              const Text(
+                'هذه الأرقام تمثل السندات المحلية المسجلة اليوم على الجهاز، وليست رصيداً بنكياً أو عهداً مركزية معتمدة. يجب مطابقة النقد والحوالات فعلياً قبل إقفال العهدة.',
+                style: TextStyle(
+                  color: AppColors.muted,
+                  fontSize: 12,
+                  height: 1.8,
+                ),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+}
+
+class _DrawerData {
+  final int receiptsCount;
+  final Map<String, double> cash;
+  final Map<String, double> transfers;
+
+  const _DrawerData({
+    required this.receiptsCount,
+    required this.cash,
+    required this.transfers,
+  });
+}
+
