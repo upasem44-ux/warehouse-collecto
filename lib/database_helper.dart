@@ -1,4 +1,3 @@
-
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 import 'package:sqflite/sqflite.dart';
@@ -8,14 +7,14 @@ class DatabaseHelper {
 
   static final DatabaseHelper instance = DatabaseHelper._();
 
-  static const int databaseVersion = 1;
+  // رفع الإصدار إلى 2 لتفعيل الترقية على الأجهزة الحالية
+  static const int databaseVersion = 2;
   static const String databaseName = 'dawacom_collector.db';
 
   Database? _database;
 
   Future<Database> get database async {
     if (_database != null) return _database!;
-
     _database = await _openDatabase();
     return _database!;
   }
@@ -29,7 +28,7 @@ class DatabaseHelper {
       version: databaseVersion,
       onConfigure: (db) async {
         await db.execute('PRAGMA foreign_keys = ON');
-        await db.execute('PRAGMA journal_mode = WAL');
+        await db.rawQuery('PRAGMA journal_mode = WAL');
         await db.execute('PRAGMA synchronous = FULL');
       },
       onCreate: _createDatabase,
@@ -69,8 +68,7 @@ class DatabaseHelper {
         shift_date TEXT NOT NULL,
         sync_status TEXT NOT NULL DEFAULT 'pending',
         synced_at TEXT,
-        FOREIGN KEY(customer_code)
-          REFERENCES customers(code)
+        FOREIGN KEY(customer_code) REFERENCES customers(code)
       )
     ''');
 
@@ -83,35 +81,29 @@ class DatabaseHelper {
       )
     ''');
 
+    await db.execute('CREATE INDEX idx_receipts_customer ON receipts(customer_code)');
+    await db.execute('CREATE INDEX idx_receipts_date ON receipts(shift_date)');
+    await db.execute('CREATE INDEX idx_receipts_sync ON receipts(sync_status)');
+    await db.execute('CREATE INDEX idx_receipts_status ON receipts(status)');
+
+    // الفهرس الفريد لمنع تكرار الحوالات
     await db.execute('''
-      CREATE INDEX idx_receipts_customer
-      ON receipts(customer_code)
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_transfer_ref 
+      ON receipts(network, transfer_ref) 
+      WHERE method = 'حوالة' AND transfer_ref IS NOT NULL AND status != 'draft'
     ''');
 
-    await db.execute('''
-      CREATE INDEX idx_receipts_date
-      ON receipts(shift_date)
-    ''');
-
-    await db.execute('''
-      CREATE INDEX idx_receipts_sync
-      ON receipts(sync_status)
-    ''');
-
-    await db.execute('''
-      CREATE INDEX idx_receipts_status
-      ON receipts(status)
-    ''');
-
-    debugPrint('Dawacom SQLite database created.');
+    debugPrint('Dawacom SQLite database initialized (v$version).');
   }
 
-  Future<void> _upgradeDatabase(
-    Database db,
-    int oldVersion,
-    int newVersion,
-  ) async {
-    // تضاف ترقيات المخطط هنا عند إصدار نسخ مستقبلية.
+  Future<void> _upgradeDatabase(Database db, int oldVersion, int newVersion) async {
+    if (oldVersion < 2) {
+      await db.execute('''
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_transfer_ref 
+        ON receipts(network, transfer_ref) 
+        WHERE method = 'حوالة' AND transfer_ref IS NOT NULL AND status != 'draft'
+      ''');
+    }
   }
 
   Future<void> close() async {
