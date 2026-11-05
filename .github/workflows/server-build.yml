@@ -62,9 +62,9 @@ jobs:
           STATUS=$(curl -sS -o /tmp/forbidden.json -w '%{http_code}' http://127.0.0.1:5080/api/admin/receipts -H "Authorization: Bearer $DIST_TOKEN")
           test "$STATUS" = "403"
 
-          # Endpoint-specific protection: ten login attempts per five minutes per IP.
-          for i in {1..10}; do
-            STATUS=$(curl -sS -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:5080/api/auth/login -H 'Content-Type: application/json' -d "{\\"username\\":\\"unknown-$i\\",\\"password\\":\\"not-a-real-password\\"}")
+          # Endpoint-specific protection: ten login attempts per five minutes per IP (two valid logins above count toward the limit).
+          for i in {1..8}; do
+            STATUS=$(curl -sS -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:5080/api/auth/login -H 'Content-Type: application/json' -d "$(printf '{\"username\":\"unknown-%s\",\"password\":\"not-a-real-password\"}' "$i")")
             test "$STATUS" = "401"
           done
           STATUS=$(curl -sS -o /tmp/rate-limited-login.json -w '%{http_code}' -X POST http://127.0.0.1:5080/api/auth/login -H 'Content-Type: application/json' -d '{"username":"unknown-final","password":"not-a-real-password"}')
