@@ -689,7 +689,7 @@ class _AuthGateState extends State<AuthGate>{
  bool loading=true,setup=false;UserAccount? user;
  @override void initState(){super.initState();check();}
  Future<void> check()async{try{final n=await dbRepo.getUserCount();if(mounted)setState((){setup=n==0;loading=false;});}catch(e){if(mounted)setState(()=>loading=false);showMsg('تعذر فتح قاعدة البيانات: $e',error:true);}}
- void enter(UserAccount u){LocalDatabase.distributorCode=u.distributorCode;setState(()=>user=u);}
+ void enter(UserAccount u){LocalDatabase.distributorCode=u.distributorCode;setState(()=>{user=u;setup=false;});}
  @override Widget build(BuildContext c){if(loading)return const Scaffold(body:Center(child:CircularProgressIndicator()));if(setup)return FirstAdminPage(onDone:enter);if(user==null)return LoginPage(onLogin:enter);return CollectorShell(user:user!,onLogout:()=>setState(()=>user=null));}
 }
 class FirstAdminPage extends StatefulWidget{final ValueChanged<UserAccount> onDone;const FirstAdminPage({super.key,required this.onDone});@override State<FirstAdminPage> createState()=>_FirstAdminPageState();}
