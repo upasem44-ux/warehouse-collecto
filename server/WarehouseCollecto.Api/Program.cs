@@ -194,7 +194,8 @@ api.MapPost("/sync/receipts",async(SyncReceiptsRequest r,ClaimsPrincipal p,AppDb
   db.Receipts.Add(new Receipt{OperationId=x.OperationId,Number=x.Number,DistributorCode=distributor,CustomerCode=x.CustomerCode,CustomerName=x.CustomerName,Amount=x.Amount,Currency=x.Currency,Method=x.Method,Network=x.Network,TransferRef=x.TransferRef,Note=x.Note,CreatedAtUtc=x.CreatedAtUtc.ToUniversalTime()});
   accepted.Add(x.OperationId);
  }
- await db.SaveChangesAsync();
+ try { await db.SaveChangesAsync(); }
+ catch(DbUpdateException) { return Results.Conflict(new {message="A duplicate receipt or transfer reference was detected. Refresh and review the receipt before retrying."}); }
  return Results.Ok(new{acceptedOperationIds=accepted});
 });
 app.Run();
