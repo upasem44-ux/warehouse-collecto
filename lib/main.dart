@@ -709,7 +709,20 @@ class LoginPage extends StatefulWidget{final ValueChanged<UserAccount> onLogin;c
 class _LoginPageState extends State<LoginPage>{
  final u=TextEditingController(),p=TextEditingController();bool busy=false,show=false;
  @override void dispose(){u.dispose();p.dispose();super.dispose();}
- Future<void> login()async{if(busy)return;setState(()=>busy=true);try{final x=await dbRepo.authenticate(u.text,p.text);if(x==null)showMsg('بيانات الدخول غير صحيحة أو الحساب موقوف/مؤقت القفل',error:true);else if(mounted)widget.onLogin(x);}catch(e){showMsg('تعذر تسجيل الدخول: $e',error:true);}finally{if(mounted)setState(()=>busy=false);}}
+ Future<void> login()async{if (busy) { return; }
+    setState(() => busy = true);
+    try {
+      final account = await dbRepo.authenticate(u.text, p.text);
+      if (account == null) {
+        showMsg('بيانات الدخول غير صحيحة أو الحساب موقوف/مؤقت القفل', error: true);
+      } else if (mounted) {
+        widget.onLogin(account);
+      }
+    } catch (e) {
+      showMsg('تعذر تسجيل الدخول: $e', error: true);
+    } finally {
+      if (mounted) setState(() => busy = false);
+    }}
  @override Widget build(BuildContext c)=>AuthCard(title:'مرحباً بك في دواكم',subtitle:'نظام التحصيل الميداني • سجّل الدخول للمتابعة',children:[
  TextField(controller:u,textInputAction:TextInputAction.next,decoration:const InputDecoration(labelText:'اسم المستخدم',prefixIcon:Icon(Icons.person_outline))),
  TextField(controller:p,obscureText:!show,onSubmitted:(_)=>login(),decoration:InputDecoration(labelText:'كلمة المرور',prefixIcon:const Icon(Icons.lock_outline),suffixIcon:IconButton(onPressed:()=>setState(()=>show=!show),icon:Icon(show?Icons.visibility_off:Icons.visibility)))),
@@ -717,17 +730,101 @@ class _LoginPageState extends State<LoginPage>{
  const Text('إذا لم تستلم حسابك، تواصل مع مدير النظام.',textAlign:TextAlign.center),
  ]);
 }
-class AuthCard extends StatelessWidget{
- final String title,subtitle;final List<Widget> children;
- const AuthCard({super.key,required this.title,required this.subtitle,required this.children});
- @override Widget build(BuildContext c)=>Scaffold(body:Container(width:double.infinity,decoration:const BoxDecoration(gradient:LinearGradient(colors:[AppColors.navy,AppColors.navyLight,AppColors.background],begin:Alignment.topRight,end:Alignment.bottomLeft)),child:SafeArea(child:Center(child:SingleChildScrollView(padding:const EdgeInsets.all(22),child:ConstrainedBox(constraints:const BoxConstraints(maxWidth:460),child:Card(shape:RoundedRectangleBorder(borderRadius:BorderRadius.circular(24)),child:Padding(padding:const EdgeInsets.all(25),child:Column(crossAxisAlignment:CrossAxisAlignment.stretch,children:[
- const CircleAvatar(radius:32,backgroundColor:AppColors.navy,child:Icon(Icons.account_balance_wallet,color:AppColors.gold,size:32)),
- const SizedBox(height:18),Text(title,textAlign:TextAlign.center,style:const TextStyle(fontSize:22,fontWeight:FontWeight.bold,color:AppColors.navy)),
- const SizedBox(height:8),Text(subtitle,textAlign:TextAlign.center,style:const TextStyle(color:AppColors.muted,fontSize:12)),const SizedBox(height:22),
- ...children.map((w)=>Padding(padding:const EdgeInsets.only(bottom:12),child:w)),
- const Text('DAWACOM • FIELD COLLECTION',textAlign:TextAlign.center,style:TextStyle(color:AppColors.muted,fontSize:9)),
- ]))))))));
+class AuthCard extends StatelessWidget {
+  final String title;
+  final String subtitle;
+  final List<Widget> children;
+
+  const AuthCard({
+    super.key,
+    required this.title,
+    required this.subtitle,
+    required this.children,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Container(
+        width: double.infinity,
+        decoration: const BoxDecoration(
+          gradient: LinearGradient(
+            colors: [AppColors.navy, AppColors.navyLight, AppColors.background],
+            begin: Alignment.topRight,
+            end: Alignment.bottomLeft,
+          ),
+        ),
+        child: SafeArea(
+          child: Center(
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.all(22),
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 460),
+                child: Card(
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(24),
+                  ),
+                  child: Padding(
+                    padding: const EdgeInsets.all(25),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        const CircleAvatar(
+                          radius: 32,
+                          backgroundColor: AppColors.navy,
+                          child: Icon(
+                            Icons.account_balance_wallet,
+                            color: AppColors.gold,
+                            size: 32,
+                          ),
+                        ),
+                        const SizedBox(height: 18),
+                        Text(
+                          title,
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(
+                            fontSize: 22,
+                            fontWeight: FontWeight.bold,
+                            color: AppColors.navy,
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          subtitle,
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(
+                            color: AppColors.muted,
+                            fontSize: 12,
+                          ),
+                        ),
+                        const SizedBox(height: 22),
+                        ...children.map(
+                          (widget) => Padding(
+                            padding: const EdgeInsets.only(bottom: 12),
+                            child: widget,
+                          ),
+                        ),
+                        const Text(
+                          'DAWACOM • FIELD COLLECTION',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            color: AppColors.muted,
+                            fontSize: 9,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 }
+
 class UserManagementPage extends StatefulWidget{const UserManagementPage({super.key});@override State<UserManagementPage> createState()=>_UserManagementPageState();}
 class _UserManagementPageState extends State<UserManagementPage>{
  late Future<List<UserAccount>> future;
