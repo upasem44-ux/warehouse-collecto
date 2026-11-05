@@ -739,7 +739,7 @@ class _CollectorShellState extends State<CollectorShell> {
           setState(() => selectedIndex = index);
         },
         backgroundColor: Colors.white,
-        indicatorColor: AppColors.gold.withOpacity(0.25),
+        indicatorColor: AppColors.gold.withValues(alpha: 0.25),
         destinations: const [
           NavigationDestination(
             icon: Icon(Icons.dashboard_outlined),
@@ -2093,7 +2093,7 @@ class _CollectPageState extends State<CollectPage> {
           const SizedBox(height: 8),
 
           DropdownButtonFormField<CurrencyType>(
-            value: currency,
+            initialValue: currency,
             decoration: const InputDecoration(
               prefixIcon: Icon(Icons.currency_exchange),
             ),
@@ -2144,7 +2144,7 @@ class _CollectPageState extends State<CollectPage> {
             const SizedBox(height: 17),
 
             DropdownButtonFormField<String>(
-              value: network,
+              initialValue: network,
               decoration: const InputDecoration(
                 labelText: 'شبكة التحويل',
                 prefixIcon: Icon(Icons.account_balance_wallet),
@@ -2460,7 +2460,7 @@ class _HistoryPageState extends State<HistoryPage> {
                               (isTransfer
                                       ? AppColors.orange
                                       : AppColors.green)
-                                  .withOpacity(0.12),
+                                  .withValues(alpha: 0.12),
                           child: Icon(
                             isTransfer
                                 ? Icons.account_balance
