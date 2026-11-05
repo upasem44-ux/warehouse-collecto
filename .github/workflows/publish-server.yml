@@ -1,6 +1,11 @@
 name: Publish Windows server
 on:
   workflow_dispatch:
+  push:
+    branches: [main, 'feature/**']
+    paths:
+      - 'server/**'
+      - '.github/workflows/publish-server.yml'
 jobs:
   publish:
     runs-on: windows-latest
