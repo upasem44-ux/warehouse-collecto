@@ -56,5 +56,6 @@ class CentralApi {
   Future<void> setUserActive(int id,bool active) async { final r=await http.patch(_uri('/api/admin/users/$id/active'),headers:_headers(auth:true),body:jsonEncode({'isActive':active})).timeout(_timeout);_decode(r); }
   Future<void> resetUserPassword(int id,String password) async { final r=await http.post(_uri('/api/admin/users/$id/reset-password'),headers:_headers(auth:true),body:jsonEncode({'newPassword':password})).timeout(_timeout);_decode(r); }
   Future<List<Map<String,dynamic>>> customers() async { final r=await http.get(_uri('/api/customers'),headers:_headers(auth:true)).timeout(_timeout);return (_decode(r) as List).cast<Map<String,dynamic>>(); }
+  Future<void> importCustomers(List<Map<String,dynamic>> customers) async { if(customers.length>2000)throw Exception('الحد الأقصى 2000 عميل في الدفعة'); final r=await http.post(_uri('/api/admin/customers/import'),headers:_headers(auth:true),body:jsonEncode({'customers':customers})).timeout(_timeout);_decode(r); }
   Future<List<String>> syncReceipts(List<Map<String,dynamic>> receipts) async { final r=await http.post(_uri('/api/sync/receipts'),headers:_headers(auth:true),body:jsonEncode({'receipts':receipts})).timeout(_timeout);final d=_decode(r) as Map<String,dynamic>;return (d['acceptedOperationIds'] as List).cast<String>(); }
 }
