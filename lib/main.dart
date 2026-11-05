@@ -8,6 +8,7 @@ import 'package:intl/intl.dart';
 import 'package:sqflite/sqflite.dart';
 import 'package:path/path.dart' as p;
 import 'package:cryptography/cryptography.dart';
+import 'central_api.dart';
 
 // ============================================================
 // 1. تشغيل التطبيق
@@ -15,6 +16,7 @@ import 'package:cryptography/cryptography.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await CentralApi.instance.initialize();
   runApp(const DawacomCollectorApp());
 }
 
@@ -145,6 +147,7 @@ class ReceiptModel {
   final ReceiptStatus status;
   final DateTime createdAt;
   final String syncStatus;
+  final String operationId;
 
   const ReceiptModel({
     this.id,
@@ -161,6 +164,7 @@ class ReceiptModel {
     required this.status,
     required this.createdAt,
     this.syncStatus = 'pending',
+    this.operationId = '',
   });
 
   factory ReceiptModel.fromMap(Map<String, Object?> map) {
@@ -188,6 +192,7 @@ class ReceiptModel {
           ) ??
           DateTime.now(),
       syncStatus: map['sync_status'] as String? ?? 'pending',
+      operationId: map['operation_id'] as String? ?? '',
     );
   }
 }
@@ -197,6 +202,7 @@ class UserAccount {
  const UserAccount({required this.id,required this.username,required this.displayName,required this.distributorCode,required this.role,required this.isActive});
  bool get isAdmin => role == 'admin';
  factory UserAccount.fromMap(Map<String,Object?> m)=>UserAccount(id:(m['id'] as num).toInt(),username:m['username'] as String,displayName:m['display_name'] as String,distributorCode:m['distributor_code'] as String,role:m['role'] as String,isActive:(m['is_active'] as num).toInt()==1);
+ factory UserAccount.fromServerMap(Map<String,dynamic> m)=>UserAccount(id:(m['id'] as num?)?.toInt()??0,username:m['username'] as String,displayName:m['displayName'] as String,distributorCode:m['distributorCode'] as String,role:m['role'] as String,isActive:m['isActive'] as bool? ?? true);
 }
 Future<String> derivePasswordHash(String password,List<int> salt) async {
  final k=await Pbkdf2(macAlgorithm:Hmac.sha256(),iterations:210000,bits:256).deriveKey(secretKey:SecretKey(utf8.encode(password)),nonce:salt);
@@ -232,7 +238,7 @@ class LocalDatabase {
 
     return openDatabase(
       path,
-      version: 3,
+      version: 4,
       onConfigure: (db) async {
         await db.execute('PRAGMA foreign_keys = ON');
         await db.execute('PRAGMA journal_mode = WAL');
@@ -255,6 +261,7 @@ class LocalDatabase {
         await db.execute('''
           CREATE TABLE receipts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            operation_id TEXT NOT NULL UNIQUE,
             number TEXT NOT NULL UNIQUE,
             distributor_code TEXT NOT NULL,
             customer_code TEXT NOT NULL,
@@ -312,6 +319,11 @@ class LocalDatabase {
           await _createIndexes(db);
         }
         if (oldVersion < 3) await _createAuthTables(db);
+        if (oldVersion < 4) {
+          await db.execute('ALTER TABLE receipts ADD COLUMN operation_id TEXT');
+          await db.execute("UPDATE receipts SET operation_id = lower(hex(randomblob(16))) WHERE operation_id IS NULL OR operation_id = ''");
+          await db.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_receipts_operation_id ON receipts(operation_id)');
+        }
       },
     );
   }
@@ -504,7 +516,9 @@ class LocalDatabase {
 
       final number = await _nextReceiptNumber(txn, date);
 
+      final operationId = List<int>.generate(16, (_) => math.Random.secure().nextInt(256)).map((x) => x.toRadixString(16).padLeft(2, '0')).join();
       final map = {
+        'operation_id': operationId,
         'number': number,
         'distributor_code': distributorCode,
         'customer_code': savedCustomer.code,
@@ -554,6 +568,16 @@ class LocalDatabase {
     );
 
     return rows.map(ReceiptModel.fromMap).toList();
+  }
+
+  Future<void> markReceiptsSynced(List<String> operationIds) async {
+    if (operationIds.isEmpty) return;
+    final d = await database;
+    await d.transaction((txn) async {
+      for (final id in operationIds) {
+        await txn.update('receipts', {'sync_status':'synced','status':'posted','synced_at':DateTime.now().toUtc().toIso8601String()}, where:'operation_id = ?', whereArgs:[id]);
+      }
+    });
   }
 
   Future<List<ReceiptModel>> getPendingReceipts() async {
@@ -620,6 +644,12 @@ class LocalDatabase {
  Future<void> _authEvent(DatabaseExecutor db,String u,String e) async => db.insert('auth_audit',{'username':u,'event':e,'created_at':DateTime.now().toUtc().toIso8601String()});
  Future<int> getUserCount() async {final d=await database;final r=await d.rawQuery('SELECT COUNT(*) AS n FROM app_users');return (r.first['n'] as num).toInt();}
  Future<UserAccount> createAccount({required String username,required String displayName,required String distributorCode,required String password,required String role}) async {
+  if (CentralApi.instance.authenticated) {
+   await CentralApi.instance.createUser(username:username,displayName:displayName,distributorCode:distributorCode,password:password,role:role);
+   final all=await CentralApi.instance.users();
+   final match=all.firstWhere((x)=>x['username'].toString().toLowerCase()==username.trim().toLowerCase());
+   return UserAccount.fromServerMap(match);
+  }
   final u=username.trim(), code=distributorCode.trim().toUpperCase();
   if(u.length<3||displayName.trim().isEmpty||code.isEmpty) throw Exception('أكمل بيانات الحساب بشكل صحيح');
   if(password.length<10) throw Exception('كلمة المرور يجب أن تكون 10 أحرف على الأقل');
@@ -647,9 +677,13 @@ class LocalDatabase {
   await d.update('app_users',{'failed_attempts':0,'locked_until':null},where:'id = ?',whereArgs:[r['id']]);
   await _authEvent(d,u,'login_success');return UserAccount.fromMap(r);
  }
- Future<List<UserAccount>> getUsers() async {final d=await database;final r=await d.query('app_users',orderBy:'role ASC, display_name COLLATE NOCASE');return r.map(UserAccount.fromMap).toList();}
- Future<void> setUserActive(int id,bool active) async {final d=await database;await d.update('app_users',{'is_active':active?1:0,'failed_attempts':0,'locked_until':null},where:"id = ? AND role = 'distributor'",whereArgs:[id]);await _authEvent(d,'user_id:$id',active?'account_activated':'account_deactivated');}
+ Future<List<UserAccount>> getUsers() async {
+  if (CentralApi.instance.authenticated) return (await CentralApi.instance.users()).map(UserAccount.fromServerMap).toList();
+  final d=await database;final r=await d.query('app_users',orderBy:'role ASC, display_name COLLATE NOCASE');return r.map(UserAccount.fromMap).toList();
+ }
+ Future<void> setUserActive(int id,bool active) async {if(CentralApi.instance.authenticated){await CentralApi.instance.setUserActive(id,active);return;}final d=await database;await d.update('app_users',{'is_active':active?1:0,'failed_attempts':0,'locked_until':null},where:"id = ? AND role = 'distributor'",whereArgs:[id]);await _authEvent(d,'user_id:$id',active?'account_activated':'account_deactivated');}
  Future<void> changeUserPassword(int id,String password) async {
+  if(CentralApi.instance.authenticated){if(password.length<12)throw Exception('كلمة المرور يجب أن تكون 12 حرفاً على الأقل');await CentralApi.instance.resetUserPassword(id,password);return;}
   if(password.length<10)throw Exception('كلمة المرور يجب أن تكون 10 أحرف على الأقل');
   final salt=List<int>.generate(16,(_)=>math.Random.secure().nextInt(256)),hash=await derivePasswordHash(password,salt),d=await database;
   await d.update('app_users',{'password_salt':base64Encode(salt),'password_hash':hash,'failed_attempts':0,'locked_until':null},where:"id = ? AND role = 'distributor'",whereArgs:[id]);
@@ -688,11 +722,11 @@ class AuthGate extends StatefulWidget{const AuthGate({super.key});@override Stat
 class _AuthGateState extends State<AuthGate>{
  bool loading=true,setup=false;UserAccount? user;
  @override void initState(){super.initState();check();}
- Future<void> check()async{try{final n=await dbRepo.getUserCount();if(mounted)setState((){setup=n==0;loading=false;});}catch(e){if(mounted)setState(()=>loading=false);showMsg('تعذر فتح قاعدة البيانات: $e',error:true);}}
+ Future<void> check()async{try{final n=await dbRepo.getUserCount();if(mounted)setState((){setup=n==0&&!CentralApi.instance.configured;loading=false;});}catch(e){if(mounted)setState(()=>loading=false);showMsg('تعذر فتح قاعدة البيانات: $e',error:true);}}
  void enter(UserAccount u){LocalDatabase.distributorCode=u.distributorCode;setState(() { user=u; setup=false; });}
- @override Widget build(BuildContext c){if(loading)return const Scaffold(body:Center(child:CircularProgressIndicator()));if(setup)return FirstAdminPage(onDone:enter);if(user==null)return LoginPage(onLogin:enter);return CollectorShell(user:user!,onLogout:()=>setState(()=>user=null));}
+ @override Widget build(BuildContext c){if(loading)return const Scaffold(body:Center(child:CircularProgressIndicator()));if(setup)return FirstAdminPage(onDone:enter,onServerConfigured:check);if(user==null)return LoginPage(onLogin:enter);return CollectorShell(user:user!,onLogout:()async{await CentralApi.instance.logout();if(mounted)setState(()=>user=null);});}
 }
-class FirstAdminPage extends StatefulWidget{final ValueChanged<UserAccount> onDone;const FirstAdminPage({super.key,required this.onDone});@override State<FirstAdminPage> createState()=>_FirstAdminPageState();}
+class FirstAdminPage extends StatefulWidget{final ValueChanged<UserAccount> onDone;final VoidCallback onServerConfigured;const FirstAdminPage({super.key,required this.onDone,required this.onServerConfigured});@override State<FirstAdminPage> createState()=>_FirstAdminPageState();}
 class _FirstAdminPageState extends State<FirstAdminPage>{
  final n=TextEditingController(),u=TextEditingController(),p=TextEditingController(),confirm=TextEditingController();bool busy=false;
  @override void dispose(){n.dispose();u.dispose();p.dispose();confirm.dispose();super.dispose();}
@@ -702,7 +736,8 @@ class _FirstAdminPageState extends State<FirstAdminPage>{
  TextField(controller:u,decoration:const InputDecoration(labelText:'اسم المستخدم')),
  TextField(controller:p,obscureText:true,decoration:const InputDecoration(labelText:'كلمة المرور (10 أحرف على الأقل)')),
  TextField(controller:confirm,obscureText:true,decoration:const InputDecoration(labelText:'تأكيد كلمة المرور')),
- FilledButton(onPressed:busy?null:save,child:Text(busy?'جارٍ الإنشاء...':'إنشاء المدير والدخول')),
+ FilledButton(onPressed:busy?null:save,child:Text(busy?'جارٍ الإنشاء...':'إنشاء المدير المحلي والدخول')),
+ OutlinedButton.icon(onPressed:()=>showServerSetup(context,widget.onServerConfigured),icon:const Icon(Icons.cloud_sync),label:const Text('ربط خادم مركزي / إنشاء المدير المركزي')),
  ]);
 }
 class LoginPage extends StatefulWidget{final ValueChanged<UserAccount> onLogin;const LoginPage({super.key,required this.onLogin});@override State<LoginPage> createState()=>_LoginPageState();}
@@ -712,7 +747,13 @@ class _LoginPageState extends State<LoginPage>{
  Future<void> login()async{if (busy) { return; }
     setState(() => busy = true);
     try {
-      final account = await dbRepo.authenticate(u.text, p.text);
+      UserAccount? account;
+      if (CentralApi.instance.configured) {
+        final remote = await CentralApi.instance.login(u.text,p.text);
+        account = UserAccount.fromServerMap({...remote,'id':0,'isActive':true});
+      } else {
+        account = await dbRepo.authenticate(u.text, p.text);
+      }
       if (account == null) {
         showMsg('بيانات الدخول غير صحيحة أو الحساب موقوف/مؤقت القفل', error: true);
       } else if (mounted) {
@@ -728,8 +769,47 @@ class _LoginPageState extends State<LoginPage>{
  TextField(controller:p,obscureText:!show,onSubmitted:(_)=>login(),decoration:InputDecoration(labelText:'كلمة المرور',prefixIcon:const Icon(Icons.lock_outline),suffixIcon:IconButton(onPressed:()=>setState(()=>show=!show),icon:Icon(show?Icons.visibility_off:Icons.visibility)))),
  FilledButton.icon(onPressed:busy?null:login,icon:const Icon(Icons.login),label:Text(busy?'جارٍ التحقق...':'تسجيل الدخول')),
  const Text('إذا لم تستلم حسابك، تواصل مع مدير النظام.',textAlign:TextAlign.center),
+ TextButton.icon(onPressed:()=>showServerSetup(context,(){if(mounted)setState((){});}),icon:const Icon(Icons.settings_ethernet),label:const Text('إعداد اتصال الخادم المركزي')),
  ]);
 }
+Future<void> showServerSetup(BuildContext context,VoidCallback onSaved) async {
+ final url=TextEditingController(text:CentralApi.instance.baseUrl??'');
+ final key=TextEditingController(),name=TextEditingController(),username=TextEditingController(),code=TextEditingController(),password=TextEditingController();
+ bool busy=false;
+ await showDialog<void>(context:context,builder:(ctx)=>StatefulBuilder(builder:(ctx,setDialog)=>AlertDialog(
+  title:const Text('إعداد الخادم المركزي'),
+  content:SingleChildScrollView(child:Column(mainAxisSize:MainAxisSize.min,children:[
+   const Text('أدخل عنوان جهاز الخادم داخل شبكة المحل. مثال: http://192.168.1.10:5080',style:TextStyle(fontSize:12)),
+   TextField(controller:url,decoration:const InputDecoration(labelText:'عنوان الخادم')),
+   const Divider(height:24),
+   const Text('لإنشاء أول مدير على خادم جديد فقط، أدخل مفتاح التهيئة الذي أعدّه مسؤول الخادم.',style:TextStyle(fontSize:11)),
+   TextField(controller:key,decoration:const InputDecoration(labelText:'مفتاح التهيئة (اختياري)')),
+   TextField(controller:name,decoration:const InputDecoration(labelText:'اسم المدير')),
+   TextField(controller:username,decoration:const InputDecoration(labelText:'اسم المستخدم')),
+   TextField(controller:code,decoration:const InputDecoration(labelText:'رمز المدير')),
+   TextField(controller:password,obscureText:true,decoration:const InputDecoration(labelText:'كلمة مرور المدير (12 حرفاً على الأقل)')),
+  ])),
+  actions:[
+   TextButton(onPressed:busy?null:()=>Navigator.pop(ctx),child:const Text('إلغاء')),
+   FilledButton(onPressed:busy?null:()async{
+    setDialog(()=>busy=true);
+    try{
+     await CentralApi.instance.configure(url.text);
+     await CentralApi.instance.health();
+     if(key.text.trim().isNotEmpty){
+      await CentralApi.instance.bootstrap(bootstrapKey:key.text,username:username.text,displayName:name.text,distributorCode:code.text,password:password.text);
+     }
+     if(ctx.mounted)Navigator.pop(ctx);
+     onSaved();
+     showMsg(key.text.trim().isEmpty?'تم الاتصال بالخادم. سجّل بحسابك الموجود.':'تم إنشاء المدير المركزي بنجاح.');
+    }catch(e){showMsg('تعذر إعداد الخادم: $e',error:true);}
+    finally{if(ctx.mounted)setDialog(()=>busy=false);}
+   },child:Text(busy?'جارٍ الاتصال...':'حفظ واختبار الاتصال'))
+  ]
+ )));
+ url.dispose();key.dispose();name.dispose();username.dispose();code.dispose();password.dispose();
+}
+
 class AuthCard extends StatelessWidget {
   final String title;
   final String subtitle;
