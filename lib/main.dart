@@ -739,22 +739,75 @@ class LocalDatabase {
 final dbRepo = LocalDatabase.instance;
 
 Future<int> syncCentralData() async {
-  final api=CentralApi.instance;
-  if(!api.authenticated)return 0;
-  final remoteCustomers=await api.customers();
-  await dbRepo.saveRemoteCustomers(remoteCustomers);
-  if(LocalDatabase.currentRole=='admin' && remoteCustomers.isEmpty){
-    final local=await dbRepo.getCustomers();
-    if(local.isNotEmpty){await api.importCustomers(local.map((c)=>{'code':c.code,'name':c.name,'area':c.area,'phone':c.phone,'balanceYer':c.balanceYer,'balanceSar':c.balanceSar,'balanceUsd':c.balanceUsd}).toList());}
+  final api = CentralApi.instance;
+  if (!api.authenticated) return 0;
+
+  final remoteCustomers = await api.customers();
+  final pending = await dbRepo.getPendingReceipts();
+
+  // Local receipt entry already reduces the device's customer balance.
+  // When the first admin imports customers into an empty server, restore the
+  // pending amounts in the import snapshot; the server will deduct those
+  // receipts exactly once when their operations are uploaded below.
+  if (LocalDatabase.currentRole == 'admin' && remoteCustomers.isEmpty) {
+    final local = await dbRepo.getCustomers();
+    if (local.isNotEmpty) {
+      final pendingByCustomer = <String, Map<String, double>>{};
+      for (final receipt in pending) {
+        final balances = pendingByCustomer.putIfAbsent(
+          receipt.customerCode,
+          () => <String, double>{'yer': 0, 'sar': 0, 'usd': 0},
+        );
+        balances[receipt.currency.name] =
+            (balances[receipt.currency.name] ?? 0) + receipt.amount;
+      }
+
+      final importRows = local.map((customer) {
+        final pendingAmounts =
+            pendingByCustomer[customer.code] ?? const <String, double>{};
+        return {
+          'code': customer.code,
+          'name': customer.name,
+          'area': customer.area,
+          'phone': customer.phone,
+          'balanceYer': customer.balanceYer + (pendingAmounts['yer'] ?? 0),
+          'balanceSar': customer.balanceSar + (pendingAmounts['sar'] ?? 0),
+          'balanceUsd': customer.balanceUsd + (pendingAmounts['usd'] ?? 0),
+        };
+      }).toList();
+
+      await api.importCustomers(importRows);
+    }
+  } else {
+    await dbRepo.saveRemoteCustomers(remoteCustomers);
   }
-  final pending=await dbRepo.getPendingReceipts(); var synced=0;
-  for(var start=0;start<pending.length;start+=250){
-    final batch=pending.skip(start).take(250).toList();
-    final payload=batch.map((r)=>{'operationId':r.operationId,'number':r.number,'distributorCode':r.distributorCode,'customerCode':r.customerCode,'customerName':r.customerName,'amount':r.amount,'currency':r.currency.name,'method':r.method,'network':r.network,'transferRef':r.transferRef,'note':r.note,'createdAtUtc':r.createdAt.toUtc().toIso8601String()}).toList();
-    final accepted=await api.syncReceipts(payload); await dbRepo.markReceiptsSynced(accepted); synced+=accepted.length;
+
+  var synced = 0;
+  for (var start = 0; start < pending.length; start += 250) {
+    final batch = pending.skip(start).take(250).toList();
+    final payload = batch
+        .map((r) => {
+              'operationId': r.operationId,
+              'number': r.number,
+              'distributorCode': r.distributorCode,
+              'customerCode': r.customerCode,
+              'customerName': r.customerName,
+              'amount': r.amount,
+              'currency': r.currency.name,
+              'method': r.method,
+              'network': r.network,
+              'transferRef': r.transferRef,
+              'note': r.note,
+              'createdAtUtc': r.createdAt.toUtc().toIso8601String(),
+            })
+        .toList();
+    final accepted = await api.syncReceipts(payload);
+    await dbRepo.markReceiptsSynced(accepted);
+    synced += accepted.length;
   }
+
   // Refresh central balances after the server has accepted this device's receipts.
-  final updatedCustomers=await api.customers();
+  final updatedCustomers = await api.customers();
   await dbRepo.saveRemoteCustomers(updatedCustomers);
   return synced;
 }
