@@ -135,18 +135,52 @@ admin.MapPost("/users",async(CreateUserRequest r,AppDbContext db,IPasswordHasher
 admin.MapPatch("/users/{id:long}/active",async(long id,SetActiveRequest r,AppDbContext db)=>{var u=await db.Users.FindAsync(id);if(u is null)return Results.NotFound();u.IsActive=r.IsActive;db.AuditLogs.Add(new AuthAudit{Username=u.Username,Event=r.IsActive?"user_activated":"user_deactivated"});await db.SaveChangesAsync();return Results.NoContent();});
 admin.MapPost("/users/{id:long}/reset-password",async(long id,ResetPasswordRequest r,AppDbContext db,IPasswordHasher<AppUser> h)=>{if(r.NewPassword.Length<12)return Results.BadRequest();var u=await db.Users.FindAsync(id);if(u is null)return Results.NotFound();u.PasswordHash=h.HashPassword(u,r.NewPassword);u.FailedAttempts=0;u.LockedUntilUtc=null;db.AuditLogs.Add(new AuthAudit{Username=u.Username,Event="password_reset"});await db.SaveChangesAsync();return Results.NoContent();});
 var api=app.MapGroup("/api").RequireAuthorization();
-api.MapGet("/customers",async(AppDbContext db)=>Results.Ok(await db.Customers.OrderBy(x=>x.Name).ToListAsync()));
+api.MapGet("/customers",async(AppDbContext db)=>Results.Ok(await db.Customers.AsNoTracking().OrderBy(x=>x.Name).ToListAsync()));
 api.MapPost("/sync/receipts",async(SyncReceiptsRequest r,ClaimsPrincipal p,AppDbContext db)=>{
- var distributor=p.FindFirstValue("distributor_code");if(string.IsNullOrWhiteSpace(distributor))return Results.Forbid();if(r.Receipts.Count>250)return Results.BadRequest();
- var accepted=new List<string>(); var seenOperations=new HashSet<string>(StringComparer.Ordinal); var seenTransfers=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+ if(r is null || r.Receipts is null || r.Receipts.Count>250) return Results.BadRequest(new {message="Invalid receipt batch."});
+ var distributor=p.FindFirstValue("distributor_code");
+ if(string.IsNullOrWhiteSpace(distributor)) return Results.Forbid();
+ var accepted=new List<string>();
+ var seenOperations=new HashSet<string>(StringComparer.Ordinal);
+ var seenTransfers=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
  foreach(var x in r.Receipts){
-  if(x.Amount<=0||decimal.Round(x.Amount,2)!=x.Amount||x.OperationId.Length is <12 or >80||x.Number.Length>100||string.IsNullOrWhiteSpace(x.CustomerCode)||string.IsNullOrWhiteSpace(x.CustomerName)||x.DistributorCode!=distributor||!new[]{"yer","sar","usd"}.Contains(x.Currency))return Results.BadRequest();
-  if(!seenOperations.Add(x.OperationId))return Results.BadRequest(new{message="Duplicate operation ID in batch."});
-  if(await db.Receipts.AnyAsync(y=>y.OperationId==x.OperationId)){accepted.Add(x.OperationId);continue;}
-  if(x.Method=="حوالة"&&!string.IsNullOrWhiteSpace(x.TransferRef)&&(!seenTransfers.Add((x.Network??"")+"|"+x.TransferRef)||await db.Receipts.AnyAsync(y=>y.Method=="حوالة"&&y.Network==x.Network&&y.TransferRef==x.TransferRef)))return Results.Conflict(new {message="Duplicate transfer reference.",operationId=x.OperationId});
-  db.Receipts.Add(new Receipt{OperationId=x.OperationId,Number=x.Number,DistributorCode=distributor,CustomerCode=x.CustomerCode,CustomerName=x.CustomerName,Amount=x.Amount,Currency=x.Currency,Method=x.Method,Network=x.Network,TransferRef=x.TransferRef,Note=x.Note,CreatedAtUtc=x.CreatedAtUtc.ToUniversalTime()});accepted.Add(x.OperationId);
+  if(x is null ||
+     string.IsNullOrWhiteSpace(x.OperationId) || x.OperationId.Length is <12 or >80 ||
+     string.IsNullOrWhiteSpace(x.Number) || x.Number.Length>100 ||
+     string.IsNullOrWhiteSpace(x.CustomerCode) || x.CustomerCode.Length>60 ||
+     string.IsNullOrWhiteSpace(x.CustomerName) || x.CustomerName.Length>200 ||
+     string.IsNullOrWhiteSpace(x.Method) || x.Method.Length>40 ||
+     x.Amount<=0 || x.Amount>9999999999999999.99m || decimal.Round(x.Amount,2)!=x.Amount ||
+     x.DistributorCode!=distributor || !new[]{"yer","sar","usd"}.Contains(x.Currency) ||
+     x.Currency.Length>8 || (x.Network?.Length ?? 0)>80 || (x.TransferRef?.Length ?? 0)>120 ||
+     (x.Note?.Length ?? 0)>1000 || x.CreatedAtUtc==default)
+    return Results.BadRequest(new {message="Invalid receipt data."});
+  if(!seenOperations.Add(x.OperationId))
+    return Results.BadRequest(new {message="Duplicate operation ID in batch."});
+  var existing=await db.Receipts.SingleOrDefaultAsync(y=>y.OperationId==x.OperationId);
+  if(existing is not null){
+    var same=existing.Number==x.Number && existing.DistributorCode==x.DistributorCode &&
+      existing.CustomerCode==x.CustomerCode && existing.CustomerName==x.CustomerName &&
+      existing.Amount==x.Amount && existing.Currency==x.Currency && existing.Method==x.Method &&
+      existing.Network==x.Network && existing.TransferRef==x.TransferRef && existing.Note==x.Note &&
+      existing.CreatedAtUtc==x.CreatedAtUtc.ToUniversalTime();
+    if(!same) return Results.Conflict(new {message="Operation ID was already used with different receipt data.",operationId=x.OperationId});
+    accepted.Add(x.OperationId);
+    continue;
+  }
+  if(!await db.Customers.AnyAsync(y=>y.Code==x.CustomerCode))
+    return Results.BadRequest(new {message="Customer does not exist on the central server.",customerCode=x.CustomerCode});
+  if(x.Method=="حوالة" && (string.IsNullOrWhiteSpace(x.Network)||string.IsNullOrWhiteSpace(x.TransferRef)))
+    return Results.BadRequest(new {message="Transfer network and reference are required."});
+  if(x.Method=="حوالة" && !string.IsNullOrWhiteSpace(x.TransferRef) &&
+     (!seenTransfers.Add((x.Network??"")+"|"+x.TransferRef) ||
+      await db.Receipts.AnyAsync(y=>y.Method=="حوالة"&&y.Network==x.Network&&y.TransferRef==x.TransferRef)))
+    return Results.Conflict(new {message="Duplicate transfer reference.",operationId=x.OperationId});
+  db.Receipts.Add(new Receipt{OperationId=x.OperationId,Number=x.Number,DistributorCode=distributor,CustomerCode=x.CustomerCode,CustomerName=x.CustomerName,Amount=x.Amount,Currency=x.Currency,Method=x.Method,Network=x.Network,TransferRef=x.TransferRef,Note=x.Note,CreatedAtUtc=x.CreatedAtUtc.ToUniversalTime()});
+  accepted.Add(x.OperationId);
  }
- await db.SaveChangesAsync();return Results.Ok(new{acceptedOperationIds=accepted});
+ await db.SaveChangesAsync();
+ return Results.Ok(new{acceptedOperationIds=accepted});
 });
 app.Run();
 record BootstrapRequest(string BootstrapKey,string Username,string DisplayName,string DistributorCode,string Password);
