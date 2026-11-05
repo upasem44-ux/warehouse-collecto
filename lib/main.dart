@@ -1243,6 +1243,20 @@ class _DashboardPageState extends State<DashboardPage> {
     await future;
   }
 
+  Future<void> syncNow() async {
+    if (!CentralApi.instance.authenticated) {
+      showMsg('سجّل الدخول إلى الخادم المركزي أولاً', error: true);
+      return;
+    }
+    try {
+      final count = await syncCentralData();
+      await refresh();
+      showMsg(count == 0 ? 'اكتملت المزامنة، لا توجد سندات جديدة' : 'تمت مزامنة $count سند');
+    } catch (e) {
+      showMsg('تعذرت المزامنة: $e', error: true);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return RefreshIndicator(
@@ -1305,13 +1319,15 @@ class _DashboardPageState extends State<DashboardPage> {
                     Row(
                       children: [
                         const Icon(
-                          Icons.cloud_off_outlined,
+                          CentralApi.instance.authenticated
+                              ? Icons.cloud_done_outlined
+                              : Icons.cloud_off_outlined,
                           color: AppColors.gold,
                         ),
                         const SizedBox(width: 8),
                         Expanded(
                           child: Text(
-                            '${data.pending} سند بانتظار المزامنة',
+                            '${data.pending} سند بانتظار المزامنة • ${CentralApi.instance.authenticated ? 'الخادم المركزي مضبوط' : 'عمل محلي'}',
                             style: const TextStyle(
                               color: AppColors.gold,
                               fontWeight: FontWeight.bold,
@@ -1336,6 +1352,18 @@ class _DashboardPageState extends State<DashboardPage> {
                         ),
                       ),
                     ),
+                    if (CentralApi.instance.authenticated) ...[
+                      const SizedBox(height: 8),
+                      OutlinedButton.icon(
+                        onPressed: syncNow,
+                        icon: const Icon(Icons.sync),
+                        label: const Text('مزامنة البيانات الآن'),
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: Colors.white,
+                          side: const BorderSide(color: AppColors.gold),
+                        ),
+                      ),
+                    ],
                   ],
                 ),
               ),
