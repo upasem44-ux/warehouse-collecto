@@ -1318,7 +1318,7 @@ class _DashboardPageState extends State<DashboardPage> {
                     const SizedBox(height: 15),
                     Row(
                       children: [
-                        const Icon(
+                        Icon(
                           CentralApi.instance.authenticated
                               ? Icons.cloud_done_outlined
                               : Icons.cloud_off_outlined,
