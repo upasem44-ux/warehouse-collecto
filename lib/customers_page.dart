@@ -202,7 +202,7 @@ class CustomerStatementSheet extends StatelessWidget {
             const SizedBox(height: 10),
             Expanded(
               child: receipts.isEmpty
-                  .?(const Center(child: Text('لا توجد سندات محلية مسجلة لهذا العميل')))
+                  ? const Center(child: Text('لا توجد سندات محلية مسجلة لهذا العميل'))
                   : ListView.builder(
                       itemCount: receipts.length,
                       itemBuilder: (context, index) {
