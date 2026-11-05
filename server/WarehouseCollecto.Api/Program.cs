@@ -98,6 +98,14 @@ app.MapPost("/api/auth/login", async (LoginRequest r, AppDbContext db, IPassword
 });
 
 var admin=app.MapGroup("/api/admin").RequireAuthorization(p=>p.RequireRole("admin"));
+admin.MapGet("/receipts",async(string? distributorCode,AppDbContext db)=>{
+ var query=db.Receipts.AsNoTracking().AsQueryable();
+ if(!string.IsNullOrWhiteSpace(distributorCode)) query=query.Where(x=>x.DistributorCode==distributorCode);
+ var rows=await query.OrderByDescending(x=>x.CreatedAtUtc).Take(2000)
+  .Select(x=>new{x.Id,x.OperationId,x.Number,x.DistributorCode,x.CustomerCode,x.CustomerName,x.Amount,x.Currency,x.Method,x.Network,x.TransferRef,x.Note,x.CreatedAtUtc})
+  .ToListAsync();
+ return Results.Ok(rows);
+});
 admin.MapGet("/audit",async(AppDbContext db)=>Results.Ok(await db.AuditLogs.OrderByDescending(x=>x.CreatedAtUtc).Take(500).Select(x=>new{x.Id,x.Username,x.Event,x.IpAddress,x.CreatedAtUtc}).ToListAsync()));
 admin.MapGet("/users",async(AppDbContext db)=>Results.Ok(await db.Users.OrderBy(x=>x.Username).Select(x=>new UserResponse(x.Id,x.Username,x.DisplayName,x.DistributorCode,x.Role,x.IsActive)).ToListAsync()));
 admin.MapPost("/customers/import", async(CustomerImportRequest request, AppDbContext db) =>
