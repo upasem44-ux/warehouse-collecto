@@ -706,9 +706,9 @@ Future<int> syncCentralData() async {
   if(!api.authenticated)return 0;
   final remoteCustomers=await api.customers();
   await dbRepo.saveRemoteCustomers(remoteCustomers);
-  if(LocalDatabase.currentRole=='admin'){
+  if(LocalDatabase.currentRole=='admin' && remoteCustomers.isEmpty){
     final local=await dbRepo.getCustomers();
-    if(local.isNotEmpty) await api.importCustomers(local.map((c)=>{'code':c.code,'name':c.name,'area':c.area,'phone':c.phone,'balanceYer':c.balanceYer,'balanceSar':c.balanceSar,'balanceUsd':c.balanceUsd}).toList());
+    if(local.isNotEmpty){await api.importCustomers(local.map((c)=>{'code':c.code,'name':c.name,'area':c.area,'phone':c.phone,'balanceYer':c.balanceYer,'balanceSar':c.balanceSar,'balanceUsd':c.balanceUsd}).toList());}
   }
   final pending=await dbRepo.getPendingReceipts(); var synced=0;
   for(var start=0;start<pending.length;start+=250){
@@ -749,7 +749,7 @@ class AuthGate extends StatefulWidget{const AuthGate({super.key});@override Stat
 class _AuthGateState extends State<AuthGate>{
  bool loading=true,setup=false;UserAccount? user;
  @override void initState(){super.initState();check();}
- Future<void> check()async{try{final n=await dbRepo.getUserCount();if(mounted)setState((){setup=n==0&&!CentralApi.instance.configured;loading=false;});}catch(e){if(mounted)setState(()=>loading=false);showMsg('تعذر فتح قاعدة البيانات: $e',error:true);}}
+ Future<void> check()async{try{final n=await dbRepo.getUserCount();final cached=CentralApi.instance.offlineSessionValid?CentralApi.instance.cachedProfile:null;if(mounted)setState((){if(cached!=null)user=UserAccount.fromServerMap(cached);setup=n==0&&!CentralApi.instance.configured&&cached==null;loading=false;});}catch(e){if(mounted)setState(()=>loading=false);showMsg('تعذر فتح قاعدة البيانات: $e',error:true);}}
  void enter(UserAccount u){LocalDatabase.distributorCode=u.distributorCode;LocalDatabase.currentRole=u.role;setState(() { user=u; setup=false; });}
  @override Widget build(BuildContext c){if(loading)return const Scaffold(body:Center(child:CircularProgressIndicator()));if(setup)return FirstAdminPage(onDone:enter,onServerConfigured:check);if(user==null)return LoginPage(onLogin:enter);return CollectorShell(user:user!,onLogout:()async{await CentralApi.instance.logout();if(mounted)setState(()=>user=null);});}
 }
