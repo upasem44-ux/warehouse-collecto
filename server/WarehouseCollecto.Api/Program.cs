@@ -38,7 +38,7 @@ app.MapPost("/api/auth/bootstrap",async(BootstrapRequest r,AppDbContext db,IPass
  if(string.IsNullOrWhiteSpace(c["BOOTSTRAP_KEY"])||r.BootstrapKey!=c["BOOTSTRAP_KEY"]) return Results.Unauthorized();
  if(await db.Users.AnyAsync()) return Results.Conflict(new {message="Bootstrap already completed."});
  if(r.Username.Trim().Length<3||r.Password.Length<12||string.IsNullOrWhiteSpace(r.DisplayName)||string.IsNullOrWhiteSpace(r.DistributorCode)) return Results.BadRequest();
- var u=new AppUser{Username=r.Username.Trim(),DisplayName=r.DisplayName.Trim(),DistributorCode=r.DistributorCode.Trim().ToUpperInvariant(),Role="admin"}; u.PasswordHash=h.HashPassword(u,r.Password); db.Users.Add(u); await db.SaveChangesAsync(); return Results.Created("/api/auth/bootstrap",new {u.Id,u.Username,u.Role});
+ var u=new AppUser{Username=r.Username.Trim(),DisplayName=r.DisplayName.Trim(),DistributorCode=r.DistributorCode.Trim().ToUpperInvariant(),Role="admin"}; u.PasswordHash=h.HashPassword(u,r.Password); db.Users.Add(u); db.AuditLogs.Add(new AuthAudit { Username=u.Username, Event="admin_bootstrap_created" }); await db.SaveChangesAsync(); return Results.Created("/api/auth/bootstrap",new {u.Id,u.Username,u.Role});
 });
 app.MapPost("/api/auth/login", async (LoginRequest r, AppDbContext db, IPasswordHasher<AppUser> h, HttpContext context) =>
 {
@@ -128,7 +128,7 @@ admin.MapPost("/customers/import", async(CustomerImportRequest request, AppDbCon
 admin.MapPost("/users",async(CreateUserRequest r,AppDbContext db,IPasswordHasher<AppUser> h)=>{
  if(r.Username.Trim().Length<3||r.Password.Length<12||string.IsNullOrWhiteSpace(r.DisplayName)||string.IsNullOrWhiteSpace(r.DistributorCode)||(r.Role!="admin"&&r.Role!="distributor")) return Results.BadRequest();
  var u=new AppUser{Username=r.Username.Trim(),DisplayName=r.DisplayName.Trim(),DistributorCode=r.DistributorCode.Trim().ToUpperInvariant(),Role=r.Role}; u.PasswordHash=h.HashPassword(u,r.Password); db.Users.Add(u);
- try{await db.SaveChangesAsync();}catch(DbUpdateException){return Results.Conflict(new {message="Username or distributor code already exists."});}
+ try{db.AuditLogs.Add(new AuthAudit { Username=u.Username, Event="user_created" }); await db.SaveChangesAsync();}catch(DbUpdateException){return Results.Conflict(new {message="Username or distributor code already exists."});}
  return Results.Created($"/api/admin/users/{u.Id}",new UserResponse(u.Id,u.Username,u.DisplayName,u.DistributorCode,u.Role,u.IsActive));
 });
 admin.MapPatch("/users/{id:long}/active",async(long id,SetActiveRequest r,AppDbContext db)=>{var u=await db.Users.FindAsync(id);if(u is null)return Results.NotFound();u.IsActive=r.IsActive;await db.SaveChangesAsync();return Results.NoContent();});
