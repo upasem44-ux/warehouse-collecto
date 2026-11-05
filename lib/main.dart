@@ -1,8 +1,13 @@
+import 'dart:ui' as ui;
+import 'dart:convert';
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
 import 'package:sqflite/sqflite.dart';
 import 'package:path/path.dart' as p;
+import 'package:cryptography/cryptography.dart';
 
 // ============================================================
 // 1. تشغيل التطبيق
@@ -187,6 +192,17 @@ class ReceiptModel {
   }
 }
 
+class UserAccount {
+ final int id; final String username, displayName, distributorCode, role; final bool isActive;
+ const UserAccount({required this.id,required this.username,required this.displayName,required this.distributorCode,required this.role,required this.isActive});
+ bool get isAdmin => role == 'admin';
+ factory UserAccount.fromMap(Map<String,Object?> m)=>UserAccount(id:(m['id'] as num).toInt(),username:m['username'] as String,displayName:m['display_name'] as String,distributorCode:m['distributor_code'] as String,role:m['role'] as String,isActive:(m['is_active'] as num).toInt()==1);
+}
+Future<String> derivePasswordHash(String password,List<int> salt) async {
+ final k=await Pbkdf2(macAlgorithm:Hmac.sha256(),iterations:210000,bits:256).deriveKey(secretKey:SecretKey(utf8.encode(password)),nonce:salt);
+ return base64Encode(await k.extractBytes());
+}
+
 // ============================================================
 // 4. قاعدة البيانات SQLite
 // ============================================================
@@ -198,7 +214,7 @@ class LocalDatabase {
 
   Database? _db;
 
-  static const String distributorCode = '1001';
+  static String distributorCode = '1001';
 
   Future<Database> get database async {
     if (_db != null) return _db!;
@@ -216,7 +232,7 @@ class LocalDatabase {
 
     return openDatabase(
       path,
-      version: 1,
+      version: 3,
       onConfigure: (db) async {
         await db.execute('PRAGMA foreign_keys = ON');
         await db.execute('PRAGMA journal_mode = WAL');
@@ -271,6 +287,31 @@ class LocalDatabase {
         ''');
 
         await _createIndexes(db);
+        await _createAuthTables(db);
+      },
+      onUpgrade: (db, oldVersion, newVersion) async {
+        if (oldVersion < 2) {
+          // Preserve legacy receipts while making transfer references unique.
+          await db.execute('''
+            UPDATE receipts
+            SET transfer_ref = 'LEGACY-' || id || '-' || transfer_ref
+            WHERE id NOT IN (
+              SELECT MAX(id)
+              FROM receipts
+              WHERE method = 'حوالة'
+                AND transfer_ref IS NOT NULL
+                AND transfer_ref != ''
+                AND status != 'draft'
+              GROUP BY network, transfer_ref
+            )
+              AND method = 'حوالة'
+              AND transfer_ref IS NOT NULL
+              AND transfer_ref != ''
+              AND status != 'draft'
+          ''');
+          await _createIndexes(db);
+        }
+        if (oldVersion < 3) await _createAuthTables(db);
       },
     );
   }
@@ -571,6 +612,50 @@ class LocalDatabase {
 
     return (rows.first['total'] as num).toInt();
   }
+
+ Future<void> _createAuthTables(DatabaseExecutor db) async {
+  await db.execute('''CREATE TABLE IF NOT EXISTS app_users(id INTEGER PRIMARY KEY AUTOINCREMENT,username TEXT NOT NULL COLLATE NOCASE UNIQUE,display_name TEXT NOT NULL,distributor_code TEXT NOT NULL UNIQUE,role TEXT NOT NULL CHECK(role IN ('admin','distributor')),password_salt TEXT NOT NULL,password_hash TEXT NOT NULL,is_active INTEGER NOT NULL DEFAULT 1,failed_attempts INTEGER NOT NULL DEFAULT 0,locked_until TEXT,created_at TEXT NOT NULL)''');
+  await db.execute('''CREATE TABLE IF NOT EXISTS auth_audit(id INTEGER PRIMARY KEY AUTOINCREMENT,username TEXT NOT NULL,event TEXT NOT NULL,created_at TEXT NOT NULL)''');
+ }
+ Future<void> _authEvent(DatabaseExecutor db,String u,String e) async => db.insert('auth_audit',{'username':u,'event':e,'created_at':DateTime.now().toUtc().toIso8601String()});
+ Future<int> getUserCount() async {final d=await database;final r=await d.rawQuery('SELECT COUNT(*) AS n FROM app_users');return (r.first['n'] as num).toInt();}
+ Future<UserAccount> createAccount({required String username,required String displayName,required String distributorCode,required String password,required String role}) async {
+  final u=username.trim(), code=distributorCode.trim().toUpperCase();
+  if(u.length<3||displayName.trim().isEmpty||code.isEmpty) throw Exception('أكمل بيانات الحساب بشكل صحيح');
+  if(password.length<10) throw Exception('كلمة المرور يجب أن تكون 10 أحرف على الأقل');
+  if(role!='admin'&&role!='distributor') throw Exception('نوع الحساب غير صحيح');
+  final salt=List<int>.generate(16,(_)=>math.Random.secure().nextInt(256)), hash=await derivePasswordHash(password,salt), d=await database;
+  final id=await d.insert('app_users',{'username':u,'display_name':displayName.trim(),'distributor_code':code,'role':role,'password_salt':base64Encode(salt),'password_hash':hash,'is_active':1,'failed_attempts':0,'locked_until':null,'created_at':DateTime.now().toUtc().toIso8601String()});
+  await _authEvent(d,u,'account_created_$role');
+  return UserAccount(id:id,username:u,displayName:displayName.trim(),distributorCode:code,role:role,isActive:true);
+ }
+ Future<UserAccount?> authenticate(String username,String password) async {
+  final d=await database,u=username.trim(),rows=await d.query('app_users',where:'username = ?',whereArgs:[u],limit:1);
+  if(rows.isEmpty){await _authEvent(d,u,'login_failed_unknown_user');return null;}
+  final r=rows.first;
+  if((r['is_active'] as num).toInt()!=1){await _authEvent(d,u,'login_blocked_inactive');return null;}
+  final until=DateTime.tryParse(r['locked_until'] as String? ?? '');
+  if(until!=null&&until.isAfter(DateTime.now().toUtc()))return null;
+  final actual=utf8.encode(await derivePasswordHash(password,base64Decode(r['password_salt'] as String))), expected=utf8.encode(r['password_hash'] as String);
+  var diff=actual.length^expected.length;
+  for(var i=0;i<math.max(actual.length,expected.length);i++){diff|=(i<actual.length?actual[i]:0)^(i<expected.length?expected[i]:0);}
+  if(diff!=0){
+   final n=(r['failed_attempts'] as num).toInt()+1, lock=n>=5?DateTime.now().toUtc().add(const Duration(minutes:10)).toIso8601String():null;
+   await d.update('app_users',{'failed_attempts':n>=5?0:n,'locked_until':lock},where:'id = ?',whereArgs:[r['id']]);
+   await _authEvent(d,u,'login_failed');return null;
+  }
+  await d.update('app_users',{'failed_attempts':0,'locked_until':null},where:'id = ?',whereArgs:[r['id']]);
+  await _authEvent(d,u,'login_success');return UserAccount.fromMap(r);
+ }
+ Future<List<UserAccount>> getUsers() async {final d=await database;final r=await d.query('app_users',orderBy:'role ASC, display_name COLLATE NOCASE');return r.map(UserAccount.fromMap).toList();}
+ Future<void> setUserActive(int id,bool active) async {final d=await database;await d.update('app_users',{'is_active':active?1:0,'failed_attempts':0,'locked_until':null},where:"id = ? AND role = 'distributor'",whereArgs:[id]);await _authEvent(d,'user_id:$id',active?'account_activated':'account_deactivated');}
+ Future<void> changeUserPassword(int id,String password) async {
+  if(password.length<10)throw Exception('كلمة المرور يجب أن تكون 10 أحرف على الأقل');
+  final salt=List<int>.generate(16,(_)=>math.Random.secure().nextInt(256)),hash=await derivePasswordHash(password,salt),d=await database;
+  await d.update('app_users',{'password_salt':base64Encode(salt),'password_hash':hash,'failed_attempts':0,'locked_until':null},where:"id = ? AND role = 'distributor'",whereArgs:[id]);
+  await _authEvent(d,'user_id:$id','password_reset_by_admin');
+ }
+
 }
 
 final dbRepo = LocalDatabase.instance;
@@ -597,6 +682,175 @@ void showMsg(
 }
 
 // ============================================================
+// 6. الدخول وإدارة الحسابات
+// ============================================================
+class AuthGate extends StatefulWidget{const AuthGate({super.key});@override State<AuthGate> createState()=>_AuthGateState();}
+class _AuthGateState extends State<AuthGate>{
+ bool loading=true,setup=false;UserAccount? user;
+ @override void initState(){super.initState();check();}
+ Future<void> check()async{try{final n=await dbRepo.getUserCount();if(mounted)setState((){setup=n==0;loading=false;});}catch(e){if(mounted)setState(()=>loading=false);showMsg('تعذر فتح قاعدة البيانات: $e',error:true);}}
+ void enter(UserAccount u){LocalDatabase.distributorCode=u.distributorCode;setState(() { user=u; setup=false; });}
+ @override Widget build(BuildContext c){if(loading)return const Scaffold(body:Center(child:CircularProgressIndicator()));if(setup)return FirstAdminPage(onDone:enter);if(user==null)return LoginPage(onLogin:enter);return CollectorShell(user:user!,onLogout:()=>setState(()=>user=null));}
+}
+class FirstAdminPage extends StatefulWidget{final ValueChanged<UserAccount> onDone;const FirstAdminPage({super.key,required this.onDone});@override State<FirstAdminPage> createState()=>_FirstAdminPageState();}
+class _FirstAdminPageState extends State<FirstAdminPage>{
+ final n=TextEditingController(),u=TextEditingController(),p=TextEditingController(),confirm=TextEditingController();bool busy=false;
+ @override void dispose(){n.dispose();u.dispose();p.dispose();confirm.dispose();super.dispose();}
+ Future<void> save()async{if(busy)return;if(p.text!=confirm.text){showMsg('كلمتا المرور غير متطابقتين',error:true);return;}setState(()=>busy=true);try{final x=await dbRepo.createAccount(username:u.text,displayName:n.text,distributorCode:'ADMIN',password:p.text,role:'admin');if(mounted)widget.onDone(x);}catch(e){showMsg('تعذر إنشاء المدير: $e',error:true);}finally{if(mounted)setState(()=>busy=false);}}
+ @override Widget build(BuildContext c)=>AuthCard(title:'إعداد النظام لأول مرة',subtitle:'أنشئ حساب مدير النظام. لا توجد كلمة مرور افتراضية.',children:[
+ TextField(controller:n,decoration:const InputDecoration(labelText:'اسم المدير')),
+ TextField(controller:u,decoration:const InputDecoration(labelText:'اسم المستخدم')),
+ TextField(controller:p,obscureText:true,decoration:const InputDecoration(labelText:'كلمة المرور (10 أحرف على الأقل)')),
+ TextField(controller:confirm,obscureText:true,decoration:const InputDecoration(labelText:'تأكيد كلمة المرور')),
+ FilledButton(onPressed:busy?null:save,child:Text(busy?'جارٍ الإنشاء...':'إنشاء المدير والدخول')),
+ ]);
+}
+class LoginPage extends StatefulWidget{final ValueChanged<UserAccount> onLogin;const LoginPage({super.key,required this.onLogin});@override State<LoginPage> createState()=>_LoginPageState();}
+class _LoginPageState extends State<LoginPage>{
+ final u=TextEditingController(),p=TextEditingController();bool busy=false,show=false;
+ @override void dispose(){u.dispose();p.dispose();super.dispose();}
+ Future<void> login()async{if (busy) { return; }
+    setState(() => busy = true);
+    try {
+      final account = await dbRepo.authenticate(u.text, p.text);
+      if (account == null) {
+        showMsg('بيانات الدخول غير صحيحة أو الحساب موقوف/مؤقت القفل', error: true);
+      } else if (mounted) {
+        widget.onLogin(account);
+      }
+    } catch (e) {
+      showMsg('تعذر تسجيل الدخول: $e', error: true);
+    } finally {
+      if (mounted) setState(() => busy = false);
+    }}
+ @override Widget build(BuildContext c)=>AuthCard(title:'مرحباً بك في دواكم',subtitle:'نظام التحصيل الميداني • سجّل الدخول للمتابعة',children:[
+ TextField(controller:u,textInputAction:TextInputAction.next,decoration:const InputDecoration(labelText:'اسم المستخدم',prefixIcon:Icon(Icons.person_outline))),
+ TextField(controller:p,obscureText:!show,onSubmitted:(_)=>login(),decoration:InputDecoration(labelText:'كلمة المرور',prefixIcon:const Icon(Icons.lock_outline),suffixIcon:IconButton(onPressed:()=>setState(()=>show=!show),icon:Icon(show?Icons.visibility_off:Icons.visibility)))),
+ FilledButton.icon(onPressed:busy?null:login,icon:const Icon(Icons.login),label:Text(busy?'جارٍ التحقق...':'تسجيل الدخول')),
+ const Text('إذا لم تستلم حسابك، تواصل مع مدير النظام.',textAlign:TextAlign.center),
+ ]);
+}
+class AuthCard extends StatelessWidget {
+  final String title;
+  final String subtitle;
+  final List<Widget> children;
+
+  const AuthCard({
+    super.key,
+    required this.title,
+    required this.subtitle,
+    required this.children,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Container(
+        width: double.infinity,
+        decoration: const BoxDecoration(
+          gradient: LinearGradient(
+            colors: [AppColors.navy, AppColors.navyLight, AppColors.background],
+            begin: Alignment.topRight,
+            end: Alignment.bottomLeft,
+          ),
+        ),
+        child: SafeArea(
+          child: Center(
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.all(22),
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 460),
+                child: Card(
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(24),
+                  ),
+                  child: Padding(
+                    padding: const EdgeInsets.all(25),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        const CircleAvatar(
+                          radius: 32,
+                          backgroundColor: AppColors.navy,
+                          child: Icon(
+                            Icons.account_balance_wallet,
+                            color: AppColors.gold,
+                            size: 32,
+                          ),
+                        ),
+                        const SizedBox(height: 18),
+                        Text(
+                          title,
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(
+                            fontSize: 22,
+                            fontWeight: FontWeight.bold,
+                            color: AppColors.navy,
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          subtitle,
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(
+                            color: AppColors.muted,
+                            fontSize: 12,
+                          ),
+                        ),
+                        const SizedBox(height: 22),
+                        ...children.map(
+                          (widget) => Padding(
+                            padding: const EdgeInsets.only(bottom: 12),
+                            child: widget,
+                          ),
+                        ),
+                        const Text(
+                          'DAWACOM • FIELD COLLECTION',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            color: AppColors.muted,
+                            fontSize: 9,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class UserManagementPage extends StatefulWidget{const UserManagementPage({super.key});@override State<UserManagementPage> createState()=>_UserManagementPageState();}
+class _UserManagementPageState extends State<UserManagementPage>{
+ late Future<List<UserAccount>> future;
+ @override void initState(){super.initState();future=dbRepo.getUsers();}
+ void reload()=>setState(()=>future=dbRepo.getUsers());
+ Future<void> add()async{
+  final n=TextEditingController(),u=TextEditingController(),code=TextEditingController(),p=TextEditingController();
+  final ok=await showDialog<bool>(context:context,builder:(ctx)=>AlertDialog(title:const Text('إضافة موزّع'),content:SingleChildScrollView(child:Column(mainAxisSize:MainAxisSize.min,children:[
+   TextField(controller:n,decoration:const InputDecoration(labelText:'اسم الموزع')),
+   TextField(controller:u,decoration:const InputDecoration(labelText:'اسم المستخدم')),
+   TextField(controller:code,decoration:const InputDecoration(labelText:'رمز الموزع الفريد')),
+   TextField(controller:p,obscureText:true,decoration:const InputDecoration(labelText:'كلمة المرور (10 أحرف على الأقل)')),
+  ])),actions:[TextButton(onPressed:()=>Navigator.pop(ctx,false),child:const Text('إلغاء')),FilledButton(onPressed:()=>Navigator.pop(ctx,true),child:const Text('إنشاء'))]));
+  if(ok==true){try{await dbRepo.createAccount(username:u.text,displayName:n.text,distributorCode:code.text,password:p.text,role:'distributor');reload();showMsg('تم إنشاء الحساب محلياً على هذا الجهاز.');}catch(e){showMsg('تعذر إنشاء الحساب: $e',error:true);}}
+  n.dispose();u.dispose();code.dispose();p.dispose();
+ }
+ Future<void> reset(UserAccount x)async{final p=TextEditingController();final v=await showDialog<String>(context:context,builder:(ctx)=>AlertDialog(title:Text('كلمة مرور ${x.displayName}'),content:TextField(controller:p,obscureText:true,decoration:const InputDecoration(labelText:'كلمة المرور الجديدة')),actions:[TextButton(onPressed:()=>Navigator.pop(ctx),child:const Text('إلغاء')),FilledButton(onPressed:()=>Navigator.pop(ctx,p.text),child:const Text('حفظ'))]));p.dispose();if(v==null||v.isEmpty)return;try{await dbRepo.changeUserPassword(x.id,v);showMsg('تم تغيير كلمة المرور');}catch(e){showMsg('$e',error:true);}}
+ Future<void> toggle(UserAccount x)async{await dbRepo.setUserActive(x.id,!x.isActive);reload();}
+ @override Widget build(BuildContext c)=>Column(children:[
+ Padding(padding:const EdgeInsets.all(16),child:Row(children:[const Expanded(child:Text('إدارة حسابات الموزعين',style:TextStyle(fontSize:18,fontWeight:FontWeight.bold))),FilledButton.icon(onPressed:add,icon:const Icon(Icons.person_add),label:const Text('إضافة مستخدم'))])),
+ Expanded(child:FutureBuilder<List<UserAccount>>(future:future,builder:(c,s){if(s.connectionState==ConnectionState.waiting)return const Center(child:CircularProgressIndicator());if(s.hasError)return Center(child:Text(s.error.toString()));final users=s.data??[];return ListView.builder(itemCount:users.length,itemBuilder:(c,i){final x=users[i];return Card(child:ListTile(leading:Icon(x.isAdmin?Icons.admin_panel_settings:Icons.delivery_dining),title:Text(x.displayName),subtitle:Text('${x.username} • ${x.distributorCode} • ${x.isActive ? 'نشط' : 'موقوف'}'),trailing:x.isAdmin?const Icon(Icons.verified_user):PopupMenuButton<String>(onSelected:(v){if(v=='toggle')toggle(x);if(v=='password')reset(x);},itemBuilder:(_)=>[PopupMenuItem(value:'toggle',child:Text(x.isActive?'إيقاف الحساب':'تفعيل الحساب')),const PopupMenuItem(value:'password',child:Text('تغيير كلمة المرور'))])));});})),
+ const Padding(padding:EdgeInsets.all(10),child:Text('الحسابات في هذه النسخة محلية؛ لن تنتقل إلى هاتف موزّع آخر إلا بعد ربط خادم مركزي.',style:TextStyle(color:AppColors.orange,fontSize:10),textAlign:TextAlign.center)),
+ ]);
+}
+
+// ============================================================
 // 6. التطبيق الرئيسي
 // ============================================================
 
@@ -611,7 +865,7 @@ class DawacomCollectorApp extends StatelessWidget {
       scaffoldMessengerKey: messengerKey,
       builder: (context, child) {
         return Directionality(
-          textDirection: TextDirection.rtl,
+          textDirection: ui.TextDirection.rtl,
           child: child ?? const SizedBox.shrink(),
         );
       },
@@ -657,7 +911,7 @@ class DawacomCollectorApp extends StatelessWidget {
           ),
         ),
       ),
-      home: const CollectorShell(),
+      home: const AuthGate(),
     );
   }
 }
@@ -666,108 +920,30 @@ class DawacomCollectorApp extends StatelessWidget {
 // 7. التنقل الرئيسي
 // ============================================================
 
-class CollectorShell extends StatefulWidget {
-  const CollectorShell({super.key});
-
-  @override
-  State<CollectorShell> createState() =>
-      _CollectorShellState();
+class CollectorShell extends StatefulWidget{
+ final UserAccount user;final VoidCallback onLogout;
+ const CollectorShell({super.key,required this.user,required this.onLogout});
+ @override State<CollectorShell> createState()=>_CollectorShellState();
 }
-
-class _CollectorShellState extends State<CollectorShell> {
-  int selectedIndex = 0;
-
-  final titles = const [
-    'الرئيسية',
-    'العملاء وكشف الحساب',
-    'تحصيل جديد',
-    'سجل السندات',
-    'صندوق العهدة',
-  ];
-
-  @override
-  Widget build(BuildContext context) {
-    final pages = [
-      DashboardPage(
-        onNavigate: (index) {
-          setState(() => selectedIndex = index);
-        },
-      ),
-      const CustomersPage(),
-      const CollectPage(),
-      const HistoryPage(),
-      const CashDrawerPage(),
-    ];
-
-    return Scaffold(
-      appBar: AppBar(
-        title: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              titles[selectedIndex],
-              style: const TextStyle(
-                fontSize: 18,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-            const Text(
-              'محلات دواكم المركزية للأدوية',
-              style: TextStyle(
-                fontSize: 11,
-                color: Color(0xFFD2DCE8),
-              ),
-            ),
-          ],
-        ),
-        actions: [
-          IconButton(
-            onPressed: () => setState(() {}),
-            icon: const Icon(Icons.refresh_rounded),
-          ),
-        ],
-      ),
-      body: IndexedStack(
-        index: selectedIndex,
-        children: pages,
-      ),
-      bottomNavigationBar: NavigationBar(
-        selectedIndex: selectedIndex,
-        onDestinationSelected: (index) {
-          setState(() => selectedIndex = index);
-        },
-        backgroundColor: Colors.white,
-        indicatorColor: AppColors.gold.withOpacity(0.25),
-        destinations: const [
-          NavigationDestination(
-            icon: Icon(Icons.dashboard_outlined),
-            selectedIcon: Icon(Icons.dashboard),
-            label: 'الرئيسية',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.people_outline),
-            selectedIcon: Icon(Icons.people),
-            label: 'العملاء',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.add_circle_outline),
-            selectedIcon: Icon(Icons.add_circle),
-            label: 'تحصيل',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.receipt_long_outlined),
-            selectedIcon: Icon(Icons.receipt_long),
-            label: 'السندات',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.account_balance_wallet_outlined),
-            selectedIcon: Icon(Icons.account_balance_wallet),
-            label: 'العهدة',
-          ),
-        ],
-      ),
-    );
-  }
+class _CollectorShellState extends State<CollectorShell>{
+ int selectedIndex=0;
+ List<String> get titles=>['الرئيسية','العملاء وكشف الحساب','تحصيل جديد','سجل السندات','صندوق العهدة',if(widget.user.isAdmin)'إدارة المستخدمين'];
+ @override Widget build(BuildContext c){
+  final pages=<Widget>[DashboardPage(onNavigate:(i)=>setState(()=>selectedIndex=i)),const CustomersPage(),const CollectPage(),const HistoryPage(),const CashDrawerPage(),if(widget.user.isAdmin)const UserManagementPage()];
+  return Scaffold(appBar:AppBar(title:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[
+   Text(titles[selectedIndex],style:const TextStyle(fontSize:18,fontWeight:FontWeight.bold)),
+   Text('مرحباً ${widget.user.displayName} • ${widget.user.isAdmin ? 'مدير النظام' : 'الموزع ${widget.user.distributorCode}'}',style:const TextStyle(fontSize:10,color:Color(0xFFD2DCE8))),
+  ]),actions:[IconButton(onPressed:()=>setState((){}),icon:const Icon(Icons.refresh_rounded)),IconButton(onPressed:widget.onLogout,icon:const Icon(Icons.logout),tooltip:'تسجيل الخروج')]),
+  body:IndexedStack(index:selectedIndex,children:pages),
+  bottomNavigationBar:NavigationBar(selectedIndex:selectedIndex,onDestinationSelected:(i)=>setState(()=>selectedIndex=i),backgroundColor:Colors.white,indicatorColor:AppColors.gold.withValues(alpha:0.25),destinations:const[
+   NavigationDestination(icon:Icon(Icons.dashboard_outlined),selectedIcon:Icon(Icons.dashboard),label:'الرئيسية'),
+   NavigationDestination(icon:Icon(Icons.people_outline),selectedIcon:Icon(Icons.people),label:'العملاء'),
+   NavigationDestination(icon:Icon(Icons.add_circle_outline),selectedIcon:Icon(Icons.add_circle),label:'تحصيل'),
+   NavigationDestination(icon:Icon(Icons.receipt_long_outlined),selectedIcon:Icon(Icons.receipt_long),label:'السندات'),
+   NavigationDestination(icon:Icon(Icons.account_balance_wallet_outlined),selectedIcon:Icon(Icons.account_balance_wallet),label:'العهدة'),
+   NavigationDestination(icon:Icon(Icons.manage_accounts_outlined),selectedIcon:Icon(Icons.manage_accounts),label:'المستخدمون'),
+  ].take(widget.user.isAdmin?6:5).toList()));
+ }
 }
 
 // ============================================================
@@ -2091,7 +2267,7 @@ class _CollectPageState extends State<CollectPage> {
           const SizedBox(height: 8),
 
           DropdownButtonFormField<CurrencyType>(
-            value: currency,
+            initialValue: currency,
             decoration: const InputDecoration(
               prefixIcon: Icon(Icons.currency_exchange),
             ),
@@ -2142,7 +2318,7 @@ class _CollectPageState extends State<CollectPage> {
             const SizedBox(height: 17),
 
             DropdownButtonFormField<String>(
-              value: network,
+              initialValue: network,
               decoration: const InputDecoration(
                 labelText: 'شبكة التحويل',
                 prefixIcon: Icon(Icons.account_balance_wallet),
@@ -2458,7 +2634,7 @@ class _HistoryPageState extends State<HistoryPage> {
                               (isTransfer
                                       ? AppColors.orange
                                       : AppColors.green)
-                                  .withOpacity(0.12),
+                                  .withValues(alpha: 0.12),
                           child: Icon(
                             isTransfer
                                 ? Icons.account_balance
