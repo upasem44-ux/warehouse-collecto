@@ -2,6 +2,7 @@ using System.Threading.RateLimiting;
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using System.Text;
+using System.Security.Cryptography;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
@@ -57,21 +58,70 @@ builder.Services.AddRateLimiter(options =>
                 QueueLimit = 0,
                 AutoReplenishment = true
             }));
+
+    // Separate, stricter limits protect password verification and one-time setup.
+    options.AddPolicy("auth-login", context =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 10,
+                Window = TimeSpan.FromMinutes(5),
+                QueueLimit = 0,
+                AutoReplenishment = true
+            }));
+
+    options.AddPolicy("auth-bootstrap", context =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 3,
+                Window = TimeSpan.FromHours(1),
+                QueueLimit = 0,
+                AutoReplenishment = true
+            }));
+
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
 });
 builder.WebHost.UseUrls(builder.Configuration["ASPNETCORE_URLS"]??"http://0.0.0.0:5080");
 var app=builder.Build();
 await using(var scope=app.Services.CreateAsyncScope()) await scope.ServiceProvider.GetRequiredService<AppDbContext>().Database.EnsureCreatedAsync();
+app.Use(async (context, next) =>
+{
+    context.Response.Headers["X-Content-Type-Options"] = "nosniff";
+    context.Response.Headers["X-Frame-Options"] = "DENY";
+    context.Response.Headers["Referrer-Policy"] = "no-referrer";
+    context.Response.Headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()";
+    context.Response.Headers["Cache-Control"] = "no-store";
+    if (context.Request.IsHttps)
+        context.Response.Headers["Strict-Transport-Security"] = "max-age=31536000";
+    await next();
+});
 app.UseRateLimiter();
 app.UseAuthentication(); app.UseAuthorization();
 app.MapGet("/health",()=>Results.Ok(new {status="ok",service="WarehouseCollecto API"}));
 app.MapPost("/api/auth/bootstrap",async(BootstrapRequest r,AppDbContext db,IPasswordHasher<AppUser> h,IConfiguration c)=>{
- if(string.IsNullOrWhiteSpace(c["BOOTSTRAP_KEY"])||r.BootstrapKey!=c["BOOTSTRAP_KEY"]) return Results.Unauthorized();
+ var expected=c["BOOTSTRAP_KEY"];
+ if(string.IsNullOrWhiteSpace(expected)||string.IsNullOrEmpty(r.BootstrapKey)||
+    !CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(r.BootstrapKey),Encoding.UTF8.GetBytes(expected)))
+     return Results.Unauthorized();
  if(await db.Users.AnyAsync()) return Results.Conflict(new {message="Bootstrap already completed."});
- if(r.Username.Trim().Length<3||r.Password.Length<12||string.IsNullOrWhiteSpace(r.DisplayName)||string.IsNullOrWhiteSpace(r.DistributorCode)) return Results.BadRequest();
- var u=new AppUser{Username=r.Username.Trim(),DisplayName=r.DisplayName.Trim(),DistributorCode=r.DistributorCode.Trim().ToUpperInvariant(),Role="admin"}; u.PasswordHash=h.HashPassword(u,r.Password); db.Users.Add(u); db.AuditLogs.Add(new AuthAudit { Username=u.Username, Event="admin_bootstrap_created" }); await db.SaveChangesAsync(); return Results.Created("/api/auth/bootstrap",new {u.Id,u.Username,u.Role});
-});
+ if(string.IsNullOrWhiteSpace(r.Username)||r.Username.Trim().Length is <3 or >80||
+    string.IsNullOrWhiteSpace(r.Password)||Encoding.UTF8.GetByteCount(r.Password)<12||Encoding.UTF8.GetByteCount(r.Password)>256||
+    string.IsNullOrWhiteSpace(r.DisplayName)||r.DisplayName.Trim().Length>160||
+    string.IsNullOrWhiteSpace(r.DistributorCode)||r.DistributorCode.Trim().Length>40) return Results.BadRequest();
+ var u=new AppUser{Username=r.Username.Trim(),DisplayName=r.DisplayName.Trim(),DistributorCode=r.DistributorCode.Trim().ToUpperInvariant(),Role="admin"}; u.PasswordHash=h.HashPassword(u,r.Password); db.Users.Add(u); db.AuditLogs.Add(new AuthAudit { Username=u.Username, Event="admin_bootstrap_created" });
+ try { await db.SaveChangesAsync(); }
+ catch(DbUpdateException) { return Results.Conflict(new {message="Bootstrap already completed or administrator already exists."}); }
+ return Results.Created("/api/auth/bootstrap",new {u.Id,u.Username,u.Role});
+}).RequireRateLimiting("auth-bootstrap");
 app.MapPost("/api/auth/login", async (LoginRequest r, AppDbContext db, IPasswordHasher<AppUser> h, HttpContext context) =>
 {
+    if (string.IsNullOrWhiteSpace(r.Username) || r.Username.Trim().Length > 80 ||
+        string.IsNullOrEmpty(r.Password) || Encoding.UTF8.GetByteCount(r.Password) > 256)
+        return Results.Unauthorized();
+
     var username = r.Username.Trim();
     var user = await db.Users.SingleOrDefaultAsync(x => x.Username == username);
     var ip = context.Connection.RemoteIpAddress?.ToString();
@@ -125,7 +175,7 @@ app.MapPost("/api/auth/login", async (LoginRequest r, AppDbContext db, IPassword
         signingCredentials: new SigningCredentials(key, SecurityAlgorithms.HmacSha256));
     return Results.Ok(new LoginResponse(user.Id, new JwtSecurityTokenHandler().WriteToken(token),
         user.Username, user.DisplayName, user.DistributorCode, user.Role, token.ValidTo));
-});
+}).RequireRateLimiting("auth-login");
 
 var admin=app.MapGroup("/api/admin").RequireAuthorization(p=>p.RequireRole("admin"));
 admin.MapGet("/receipts",async(string? distributorCode,AppDbContext db)=>{
