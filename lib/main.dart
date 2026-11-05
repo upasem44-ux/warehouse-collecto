@@ -745,13 +745,19 @@ Future<int> syncCentralData() async {
   final remoteCustomers = await api.customers();
   final pending = await dbRepo.getPendingReceipts();
 
-  // Local receipt entry already reduces the device's customer balance.
-  // When the first admin imports customers into an empty server, restore the
-  // pending amounts in the import snapshot; the server will deduct those
-  // receipts exactly once when their operations are uploaded below.
-  if (LocalDatabase.currentRole == 'admin' && remoteCustomers.isEmpty) {
+  // Customer balances on a device already include locally entered receipts.
+  // Import only customers missing centrally, adding back their pending receipt
+  // amounts so the server can deduct each operation exactly once on upload.
+  if (LocalDatabase.currentRole == 'admin') {
     final local = await dbRepo.getCustomers();
-    if (local.isNotEmpty) {
+    final remoteCodes = remoteCustomers
+        .map((row) => row['code']?.toString() ?? '')
+        .where((code) => code.isNotEmpty)
+        .toSet();
+    final missingCustomers =
+        local.where((customer) => !remoteCodes.contains(customer.code)).toList();
+
+    if (missingCustomers.isNotEmpty) {
       final pendingByCustomer = <String, Map<String, double>>{};
       for (final receipt in pending) {
         final balances = pendingByCustomer.putIfAbsent(
@@ -762,7 +768,7 @@ Future<int> syncCentralData() async {
             (balances[receipt.currency.name] ?? 0) + receipt.amount;
       }
 
-      final importRows = local.map((customer) {
+      final importRows = missingCustomers.map((customer) {
         final pendingAmounts =
             pendingByCustomer[customer.code] ?? const <String, double>{};
         return {
@@ -776,7 +782,9 @@ Future<int> syncCentralData() async {
         };
       }).toList();
 
-      await api.importCustomers(importRows);
+      for (var start = 0; start < importRows.length; start += 2000) {
+        await api.importCustomers(importRows.skip(start).take(2000).toList());
+      }
     }
   } else {
     await dbRepo.saveRemoteCustomers(remoteCustomers);
