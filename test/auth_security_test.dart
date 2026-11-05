@@ -26,6 +26,20 @@ void main() {
     });
   });
 
+  test('central user mapping preserves the server identity', () {
+    final user = UserAccount.fromServerMap({
+      'id': 42,
+      'username': 'field.user',
+      'displayName': 'Field User',
+      'distributorCode': 'D-42',
+      'role': 'distributor',
+      'isActive': true,
+    });
+    expect(user.id, 42);
+    expect(user.distributorCode, 'D-42');
+    expect(user.isAdmin, isFalse);
+  });
+
   test('user account model identifies administrator role', () {
     final user = UserAccount.fromMap({
       'id': 1,
