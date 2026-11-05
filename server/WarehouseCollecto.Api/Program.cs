@@ -40,13 +40,63 @@ app.MapPost("/api/auth/bootstrap",async(BootstrapRequest r,AppDbContext db,IPass
  if(r.Username.Trim().Length<3||r.Password.Length<12||string.IsNullOrWhiteSpace(r.DisplayName)||string.IsNullOrWhiteSpace(r.DistributorCode)) return Results.BadRequest();
  var u=new AppUser{Username=r.Username.Trim(),DisplayName=r.DisplayName.Trim(),DistributorCode=r.DistributorCode.Trim().ToUpperInvariant(),Role="admin"}; u.PasswordHash=h.HashPassword(u,r.Password); db.Users.Add(u); await db.SaveChangesAsync(); return Results.Created("/api/auth/bootstrap",new {u.Id,u.Username,u.Role});
 });
-app.MapPost("/api/auth/login",async(LoginRequest r,AppDbContext db,IPasswordHasher<AppUser> h)=>{
- var u=await db.Users.SingleOrDefaultAsync(x=>x.Username==r.Username.Trim());
- if(u is null||!u.IsActive||h.VerifyHashedPassword(u,u.PasswordHash,r.Password)==PasswordVerificationResult.Failed) return Results.Unauthorized();
- var claims=new[]{new Claim(ClaimTypes.NameIdentifier,u.Id.ToString()),new Claim(ClaimTypes.Name,u.Username),new Claim(ClaimTypes.Role,u.Role),new Claim("distributor_code",u.DistributorCode)};
- var token=new JwtSecurityToken("WarehouseCollecto","WarehouseCollecto.Mobile",claims,expires:DateTime.UtcNow.AddHours(24),signingCredentials:new SigningCredentials(key,SecurityAlgorithms.HmacSha256));
- return Results.Ok(new LoginResponse(u.Id,new JwtSecurityTokenHandler().WriteToken(token),u.Username,u.DisplayName,u.DistributorCode,u.Role,token.ValidTo));
+app.MapPost("/api/auth/login", async (LoginRequest r, AppDbContext db, IPasswordHasher<AppUser> h, HttpContext context) =>
+{
+    var username = r.Username.Trim();
+    var user = await db.Users.SingleOrDefaultAsync(x => x.Username == username);
+    var ip = context.Connection.RemoteIpAddress?.ToString();
+    if (user is null)
+    {
+        db.AuditLogs.Add(new AuthAudit { Username = username, Event = "login_failed_unknown_user", IpAddress = ip });
+        await db.SaveChangesAsync();
+        return Results.Unauthorized();
+    }
+    if (!user.IsActive)
+    {
+        db.AuditLogs.Add(new AuthAudit { Username = username, Event = "login_blocked_inactive", IpAddress = ip });
+        await db.SaveChangesAsync();
+        return Results.Unauthorized();
+    }
+    if (user.LockedUntilUtc is DateTime locked && locked > DateTime.UtcNow)
+    {
+        db.AuditLogs.Add(new AuthAudit { Username = username, Event = "login_blocked_locked", IpAddress = ip });
+        await db.SaveChangesAsync();
+        return Results.Unauthorized();
+    }
+    var verification = h.VerifyHashedPassword(user, user.PasswordHash, r.Password);
+    if (verification == PasswordVerificationResult.Failed)
+    {
+        user.FailedAttempts++;
+        if (user.FailedAttempts >= 5)
+        {
+            user.FailedAttempts = 0;
+            user.LockedUntilUtc = DateTime.UtcNow.AddMinutes(10);
+        }
+        db.AuditLogs.Add(new AuthAudit { Username = username, Event = "login_failed", IpAddress = ip });
+        await db.SaveChangesAsync();
+        return Results.Unauthorized();
+    }
+    if (verification == PasswordVerificationResult.SuccessRehashNeeded)
+        user.PasswordHash = h.HashPassword(user, r.Password);
+    user.FailedAttempts = 0;
+    user.LockedUntilUtc = null;
+    db.AuditLogs.Add(new AuthAudit { Username = username, Event = "login_success", IpAddress = ip });
+    await db.SaveChangesAsync();
+
+    var claims = new[]
+    {
+        new Claim(ClaimTypes.NameIdentifier, user.Id.ToString()),
+        new Claim(ClaimTypes.Name, user.Username),
+        new Claim(ClaimTypes.Role, user.Role),
+        new Claim("distributor_code", user.DistributorCode)
+    };
+    var token = new JwtSecurityToken("WarehouseCollecto", "WarehouseCollecto.Mobile", claims,
+        expires: DateTime.UtcNow.AddHours(24),
+        signingCredentials: new SigningCredentials(key, SecurityAlgorithms.HmacSha256));
+    return Results.Ok(new LoginResponse(user.Id, new JwtSecurityTokenHandler().WriteToken(token),
+        user.Username, user.DisplayName, user.DistributorCode, user.Role, token.ValidTo));
 });
+
 var admin=app.MapGroup("/api/admin").RequireAuthorization(p=>p.RequireRole("admin"));
 admin.MapGet("/users",async(AppDbContext db)=>Results.Ok(await db.Users.OrderBy(x=>x.Username).Select(x=>new UserResponse(x.Id,x.Username,x.DisplayName,x.DistributorCode,x.Role,x.IsActive)).ToListAsync()));
 admin.MapPost("/customers/import", async(CustomerImportRequest request, AppDbContext db) =>
