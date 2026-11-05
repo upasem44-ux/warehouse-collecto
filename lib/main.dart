@@ -786,7 +786,9 @@ Future<int> syncCentralData() async {
         await api.importCustomers(importRows.skip(start).take(2000).toList());
       }
     }
-  } else {
+  } else if (pending.isEmpty) {
+    // Do not overwrite locally reduced balances while unsent receipts exist.
+    // A successful upload is followed by a fresh central balance download.
     await dbRepo.saveRemoteCustomers(remoteCustomers);
   }
 
