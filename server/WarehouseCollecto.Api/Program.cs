@@ -181,6 +181,7 @@ api.MapPost("/sync/receipts",async(SyncReceiptsRequest r,ClaimsPrincipal p,AppDb
  var accepted=new List<string>();
  var seenOperations=new HashSet<string>(StringComparer.Ordinal);
  var seenTransfers=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+ await using var transaction=await db.Database.BeginTransactionAsync();
  foreach(var x in r.Receipts){
   if(x is null ||
      string.IsNullOrWhiteSpace(x.OperationId) || x.OperationId.Length is <12 or >80 ||
@@ -206,26 +207,39 @@ api.MapPost("/sync/receipts",async(SyncReceiptsRequest r,ClaimsPrincipal p,AppDb
     accepted.Add(x.OperationId);
     continue;
   }
-  var customer=await db.Customers.SingleOrDefaultAsync(y=>y.Code==x.CustomerCode);
-  if(customer is null)
-    return Results.BadRequest(new {message="Customer does not exist on the central server.",customerCode=x.CustomerCode});
   if(x.Method=="حوالة" && (string.IsNullOrWhiteSpace(x.Network)||string.IsNullOrWhiteSpace(x.TransferRef)))
     return Results.BadRequest(new {message="Transfer network and reference are required."});
   if(x.Method=="حوالة" && !string.IsNullOrWhiteSpace(x.TransferRef) &&
      (!seenTransfers.Add((x.Network??"")+"|"+x.TransferRef) ||
       await db.Receipts.AnyAsync(y=>y.Method=="حوالة"&&y.Network==x.Network&&y.TransferRef==x.TransferRef)))
     return Results.Conflict(new {message="Duplicate transfer reference.",operationId=x.OperationId});
-  switch(x.Currency){
-   case "yer": customer.BalanceYer-=x.Amount; break;
-   case "sar": customer.BalanceSar-=x.Amount; break;
-   case "usd": customer.BalanceUsd-=x.Amount; break;
-  }
-  customer.UpdatedAtUtc=DateTime.UtcNow;
+
+  var now=DateTime.UtcNow;
+  var updated=x.Currency switch
+  {
+   "yer" => await db.Customers.Where(y=>y.Code==x.CustomerCode)
+     .ExecuteUpdateAsync(s=>s.SetProperty(y=>y.BalanceYer,y=>y.BalanceYer-x.Amount).SetProperty(y=>y.UpdatedAtUtc,now)),
+   "sar" => await db.Customers.Where(y=>y.Code==x.CustomerCode)
+     .ExecuteUpdateAsync(s=>s.SetProperty(y=>y.BalanceSar,y=>y.BalanceSar-x.Amount).SetProperty(y=>y.UpdatedAtUtc,now)),
+   "usd" => await db.Customers.Where(y=>y.Code==x.CustomerCode)
+     .ExecuteUpdateAsync(s=>s.SetProperty(y=>y.BalanceUsd,y=>y.BalanceUsd-x.Amount).SetProperty(y=>y.UpdatedAtUtc,now)),
+   _ => 0
+  };
+  if(updated==0)
+    return Results.BadRequest(new {message="Customer does not exist on the central server.",customerCode=x.CustomerCode});
+
   db.Receipts.Add(new Receipt{OperationId=x.OperationId,Number=x.Number,DistributorCode=distributor,CustomerCode=x.CustomerCode,CustomerName=x.CustomerName,Amount=x.Amount,Currency=x.Currency,Method=x.Method,Network=x.Network,TransferRef=x.TransferRef,Note=x.Note,CreatedAtUtc=x.CreatedAtUtc.ToUniversalTime()});
   accepted.Add(x.OperationId);
  }
- try { await db.SaveChangesAsync(); }
- catch(DbUpdateException) { return Results.Conflict(new {message="A duplicate receipt or transfer reference was detected. Refresh and review the receipt before retrying."}); }
+ try
+ {
+  await db.SaveChangesAsync();
+  await transaction.CommitAsync();
+ }
+ catch(DbUpdateException)
+ {
+  return Results.Conflict(new {message="A duplicate receipt or transfer reference was detected. Refresh and review the receipt before retrying."});
+ }
  return Results.Ok(new{acceptedOperationIds=accepted});
 });
 app.Run();
