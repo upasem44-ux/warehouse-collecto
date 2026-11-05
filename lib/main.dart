@@ -569,6 +569,19 @@ class LocalDatabase {
 
       final id = await txn.insert('receipts', map);
 
+      final balanceColumn = switch (currency) {
+        CurrencyType.yer => 'balance_yer',
+        CurrencyType.sar => 'balance_sar',
+        CurrencyType.usd => 'balance_usd',
+      };
+      final currentBalance = (customerRows.first[balanceColumn] as num?)?.toDouble() ?? 0;
+      await txn.update(
+        'customers',
+        {'$balanceColumn': currentBalance - amount, 'updated_at': DateTime.now().toUtc().toIso8601String()},
+        where: 'code = ?',
+        whereArgs: [savedCustomer.code],
+      );
+
       return ReceiptModel.fromMap({
         ...map,
         'id': id,
@@ -740,6 +753,9 @@ Future<int> syncCentralData() async {
     final payload=batch.map((r)=>{'operationId':r.operationId,'number':r.number,'distributorCode':r.distributorCode,'customerCode':r.customerCode,'customerName':r.customerName,'amount':r.amount,'currency':r.currency.name,'method':r.method,'network':r.network,'transferRef':r.transferRef,'note':r.note,'createdAtUtc':r.createdAt.toUtc().toIso8601String()}).toList();
     final accepted=await api.syncReceipts(payload); await dbRepo.markReceiptsSynced(accepted); synced+=accepted.length;
   }
+  // Refresh central balances after the server has accepted this device's receipts.
+  final updatedCustomers=await api.customers();
+  await dbRepo.saveRemoteCustomers(updatedCustomers);
   return synced;
 }
 
