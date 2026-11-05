@@ -285,3 +285,6 @@ class ReceiptRepository {
 
   Future<void> close() => _helper.close();
 }
+
+/// Shared repository instance used by the customer and receipt screens.
+final ReceiptRepository repository = ReceiptRepository();
