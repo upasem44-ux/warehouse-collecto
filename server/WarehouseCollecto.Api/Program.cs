@@ -31,6 +31,7 @@ builder.Services.AddRateLimiter(options =>
 builder.WebHost.UseUrls(builder.Configuration["ASPNETCORE_URLS"]??"http://0.0.0.0:5080");
 var app=builder.Build();
 await using(var scope=app.Services.CreateAsyncScope()) await scope.ServiceProvider.GetRequiredService<AppDbContext>().Database.EnsureCreatedAsync();
+app.UseRateLimiter();
 app.UseAuthentication(); app.UseAuthorization();
 app.MapGet("/health",()=>Results.Ok(new {status="ok",service="WarehouseCollecto API"}));
 app.MapPost("/api/auth/bootstrap",async(BootstrapRequest r,AppDbContext db,IPasswordHasher<AppUser> h,IConfiguration c)=>{
@@ -54,8 +55,7 @@ admin.MapPost("/customers/import", async(CustomerImportRequest request, AppDbCon
     foreach (var item in request.Customers)
     {
         if (string.IsNullOrWhiteSpace(item.Code) || string.IsNullOrWhiteSpace(item.Name) ||
-            item.Code.Length > 60 || item.Name.Length > 200 ||
-            item.BalanceYer < 0 || item.BalanceSar < 0 || item.BalanceUsd < 0)
+            item.Code.Length > 60 || item.Name.Length > 200)
             return Results.BadRequest(new { message = "Invalid customer data." });
         var code = item.Code.Trim();
         var customer = await db.Customers.FindAsync(code);
