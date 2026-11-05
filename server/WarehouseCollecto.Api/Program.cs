@@ -98,6 +98,7 @@ app.MapPost("/api/auth/login", async (LoginRequest r, AppDbContext db, IPassword
 });
 
 var admin=app.MapGroup("/api/admin").RequireAuthorization(p=>p.RequireRole("admin"));
+admin.MapGet("/audit",async(AppDbContext db)=>Results.Ok(await db.AuditLogs.OrderByDescending(x=>x.CreatedAtUtc).Take(500).Select(x=>new{x.Id,x.Username,x.Event,x.IpAddress,x.CreatedAtUtc}).ToListAsync()));
 admin.MapGet("/users",async(AppDbContext db)=>Results.Ok(await db.Users.OrderBy(x=>x.Username).Select(x=>new UserResponse(x.Id,x.Username,x.DisplayName,x.DistributorCode,x.Role,x.IsActive)).ToListAsync()));
 admin.MapPost("/customers/import", async(CustomerImportRequest request, AppDbContext db) =>
 {
@@ -131,17 +132,18 @@ admin.MapPost("/users",async(CreateUserRequest r,AppDbContext db,IPasswordHasher
  try{db.AuditLogs.Add(new AuthAudit { Username=u.Username, Event="user_created" }); await db.SaveChangesAsync();}catch(DbUpdateException){return Results.Conflict(new {message="Username or distributor code already exists."});}
  return Results.Created($"/api/admin/users/{u.Id}",new UserResponse(u.Id,u.Username,u.DisplayName,u.DistributorCode,u.Role,u.IsActive));
 });
-admin.MapPatch("/users/{id:long}/active",async(long id,SetActiveRequest r,AppDbContext db)=>{var u=await db.Users.FindAsync(id);if(u is null)return Results.NotFound();u.IsActive=r.IsActive;await db.SaveChangesAsync();return Results.NoContent();});
-admin.MapPost("/users/{id:long}/reset-password",async(long id,ResetPasswordRequest r,AppDbContext db,IPasswordHasher<AppUser> h)=>{if(r.NewPassword.Length<12)return Results.BadRequest();var u=await db.Users.FindAsync(id);if(u is null)return Results.NotFound();u.PasswordHash=h.HashPassword(u,r.NewPassword);await db.SaveChangesAsync();return Results.NoContent();});
+admin.MapPatch("/users/{id:long}/active",async(long id,SetActiveRequest r,AppDbContext db)=>{var u=await db.Users.FindAsync(id);if(u is null)return Results.NotFound();u.IsActive=r.IsActive;db.AuditLogs.Add(new AuthAudit{Username=u.Username,Event=r.IsActive?"user_activated":"user_deactivated"});await db.SaveChangesAsync();return Results.NoContent();});
+admin.MapPost("/users/{id:long}/reset-password",async(long id,ResetPasswordRequest r,AppDbContext db,IPasswordHasher<AppUser> h)=>{if(r.NewPassword.Length<12)return Results.BadRequest();var u=await db.Users.FindAsync(id);if(u is null)return Results.NotFound();u.PasswordHash=h.HashPassword(u,r.NewPassword);u.FailedAttempts=0;u.LockedUntilUtc=null;db.AuditLogs.Add(new AuthAudit{Username=u.Username,Event="password_reset"});await db.SaveChangesAsync();return Results.NoContent();});
 var api=app.MapGroup("/api").RequireAuthorization();
 api.MapGet("/customers",async(AppDbContext db)=>Results.Ok(await db.Customers.OrderBy(x=>x.Name).ToListAsync()));
 api.MapPost("/sync/receipts",async(SyncReceiptsRequest r,ClaimsPrincipal p,AppDbContext db)=>{
  var distributor=p.FindFirstValue("distributor_code");if(string.IsNullOrWhiteSpace(distributor))return Results.Forbid();if(r.Receipts.Count>250)return Results.BadRequest();
- var accepted=new List<string>();
+ var accepted=new List<string>(); var seenOperations=new HashSet<string>(StringComparer.Ordinal); var seenTransfers=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
  foreach(var x in r.Receipts){
-  if(x.Amount<=0||decimal.Round(x.Amount,2)!=x.Amount||x.OperationId.Length is <12 or >80||x.DistributorCode!=distributor)return Results.BadRequest();
+  if(x.Amount<=0||decimal.Round(x.Amount,2)!=x.Amount||x.OperationId.Length is <12 or >80||x.Number.Length>100||string.IsNullOrWhiteSpace(x.CustomerCode)||string.IsNullOrWhiteSpace(x.CustomerName)||x.DistributorCode!=distributor||!new[]{\"yer\",\"sar\",\"usd\"}.Contains(x.Currency))return Results.BadRequest();
+  if(!seenOperations.Add(x.OperationId))return Results.BadRequest(new{message=\"Duplicate operation ID in batch.\"});
   if(await db.Receipts.AnyAsync(y=>y.OperationId==x.OperationId)){accepted.Add(x.OperationId);continue;}
-  if(x.Method=="حوالة"&&!string.IsNullOrWhiteSpace(x.TransferRef)&&await db.Receipts.AnyAsync(y=>y.Method=="حوالة"&&y.Network==x.Network&&y.TransferRef==x.TransferRef))return Results.Conflict(new {message="Duplicate transfer reference.",operationId=x.OperationId});
+  if(x.Method=="حوالة"&&!string.IsNullOrWhiteSpace(x.TransferRef)&&(!seenTransfers.Add((x.Network??"")+"|"+x.TransferRef)||await db.Receipts.AnyAsync(y=>y.Method=="حوالة"&&y.Network==x.Network&&y.TransferRef==x.TransferRef)))return Results.Conflict(new {message="Duplicate transfer reference.",operationId=x.OperationId});
   db.Receipts.Add(new Receipt{OperationId=x.OperationId,Number=x.Number,DistributorCode=distributor,CustomerCode=x.CustomerCode,CustomerName=x.CustomerName,Amount=x.Amount,Currency=x.Currency,Method=x.Method,Network=x.Network,TransferRef=x.TransferRef,Note=x.Note,CreatedAtUtc=x.CreatedAtUtc.ToUniversalTime()});accepted.Add(x.OperationId);
  }
  await db.SaveChangesAsync();return Results.Ok(new{acceptedOperationIds=accepted});
