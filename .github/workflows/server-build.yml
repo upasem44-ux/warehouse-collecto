@@ -1,0 +1,24 @@
+name: Build central API
+on:
+  push:
+    branches: [main, "feature/**"]
+    paths:
+      - "server/**"
+      - ".github/workflows/server-build.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "server/**"
+      - ".github/workflows/server-build.yml"
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+      - name: Restore
+        run: dotnet restore server/WarehouseCollecto.Api/WarehouseCollecto.Api.csproj
+      - name: Build
+        run: dotnet build server/WarehouseCollecto.Api/WarehouseCollecto.Api.csproj --no-restore --configuration Release
