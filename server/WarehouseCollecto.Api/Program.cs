@@ -1,3 +1,4 @@
+using System.Threading.RateLimiting;
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using System.Text;
@@ -14,6 +15,19 @@ if(string.IsNullOrWhiteSpace(secret)||Encoding.UTF8.GetByteCount(secret)<32) thr
 var key=new SymmetricSecurityKey(Encoding.UTF8.GetBytes(secret));
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme).AddJwtBearer(o=>o.TokenValidationParameters=new TokenValidationParameters { ValidateIssuer=true,ValidIssuer="WarehouseCollecto",ValidateAudience=true,ValidAudience="WarehouseCollecto.Mobile",ValidateIssuerSigningKey=true,IssuerSigningKey=key,ValidateLifetime=true,ClockSkew=TimeSpan.FromSeconds(30) });
 builder.Services.AddAuthorization();
+builder.Services.AddRateLimiter(options =>
+{
+    options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(context =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 120,
+                Window = TimeSpan.FromMinutes(1),
+                QueueLimit = 0,
+                AutoReplenishment = true
+            }));
+});
 builder.WebHost.UseUrls(builder.Configuration["ASPNETCORE_URLS"]??"http://0.0.0.0:5080");
 var app=builder.Build();
 await using(var scope=app.Services.CreateAsyncScope()) await scope.ServiceProvider.GetRequiredService<AppDbContext>().Database.EnsureCreatedAsync();
@@ -29,7 +43,7 @@ app.MapPost("/api/auth/login",async(LoginRequest r,AppDbContext db,IPasswordHash
  var u=await db.Users.SingleOrDefaultAsync(x=>x.Username==r.Username.Trim());
  if(u is null||!u.IsActive||h.VerifyHashedPassword(u,u.PasswordHash,r.Password)==PasswordVerificationResult.Failed) return Results.Unauthorized();
  var claims=new[]{new Claim(ClaimTypes.NameIdentifier,u.Id.ToString()),new Claim(ClaimTypes.Name,u.Username),new Claim(ClaimTypes.Role,u.Role),new Claim("distributor_code",u.DistributorCode)};
- var token=new JwtSecurityToken("WarehouseCollecto","WarehouseCollecto.Mobile",claims,expires:DateTime.UtcNow.AddHours(8),signingCredentials:new SigningCredentials(key,SecurityAlgorithms.HmacSha256));
+ var token=new JwtSecurityToken("WarehouseCollecto","WarehouseCollecto.Mobile",claims,expires:DateTime.UtcNow.AddHours(24),signingCredentials:new SigningCredentials(key,SecurityAlgorithms.HmacSha256));
  return Results.Ok(new LoginResponse(u.Id,new JwtSecurityTokenHandler().WriteToken(token),u.Username,u.DisplayName,u.DistributorCode,u.Role,token.ValidTo));
 });
 var admin=app.MapGroup("/api/admin").RequireAuthorization(p=>p.RequireRole("admin"));
