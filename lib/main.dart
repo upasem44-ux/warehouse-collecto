@@ -749,7 +749,7 @@ class AuthGate extends StatefulWidget{const AuthGate({super.key});@override Stat
 class _AuthGateState extends State<AuthGate>{
  bool loading=true,setup=false;UserAccount? user;
  @override void initState(){super.initState();check();}
- Future<void> check()async{try{final n=await dbRepo.getUserCount();final cached=CentralApi.instance.offlineSessionValid?CentralApi.instance.cachedProfile:null;if(mounted)setState((){if(cached!=null)user=UserAccount.fromServerMap(cached);setup=n==0&&!CentralApi.instance.configured&&cached==null;loading=false;});}catch(e){if(mounted)setState(()=>loading=false);showMsg('تعذر فتح قاعدة البيانات: $e',error:true);}}
+ Future<void> check()async{try{final n=await dbRepo.getUserCount();final cached=CentralApi.instance.offlineSessionValid?CentralApi.instance.cachedProfile:null;if(cached!=null){user=UserAccount.fromServerMap(cached);LocalDatabase.distributorCode=user!.distributorCode;LocalDatabase.currentRole=user!.role;}if(mounted)setState((){setup=n==0&&!CentralApi.instance.configured&&cached==null;loading=false;});}catch(e){if(mounted)setState(()=>loading=false);showMsg('تعذر فتح قاعدة البيانات: $e',error:true);}}
  void enter(UserAccount u){LocalDatabase.distributorCode=u.distributorCode;LocalDatabase.currentRole=u.role;setState(() { user=u; setup=false; });}
  @override Widget build(BuildContext c){if(loading)return const Scaffold(body:Center(child:CircularProgressIndicator()));if(setup)return FirstAdminPage(onDone:enter,onServerConfigured:check);if(user==null)return LoginPage(onLogin:enter);return CollectorShell(user:user!,onLogout:()async{await CentralApi.instance.logout();if(mounted)setState(()=>user=null);});}
 }
@@ -761,7 +761,7 @@ class _FirstAdminPageState extends State<FirstAdminPage>{
  @override Widget build(BuildContext c)=>AuthCard(title:'إعداد النظام لأول مرة',subtitle:'أنشئ حساب مدير النظام. لا توجد كلمة مرور افتراضية.',children:[
  TextField(controller:n,decoration:const InputDecoration(labelText:'اسم المدير')),
  TextField(controller:u,decoration:const InputDecoration(labelText:'اسم المستخدم')),
- TextField(controller:p,obscureText:true,decoration:const InputDecoration(labelText:'كلمة المرور (10 أحرف على الأقل)')),
+ TextField(controller:p,obscureText:true,decoration:const InputDecoration(labelText:'كلمة المرور (12 حرفاً على الأقل)')),
  TextField(controller:confirm,obscureText:true,decoration:const InputDecoration(labelText:'تأكيد كلمة المرور')),
  FilledButton(onPressed:busy?null:save,child:Text(busy?'جارٍ الإنشاء...':'إنشاء المدير المحلي والدخول')),
  OutlinedButton.icon(onPressed:()=>showServerSetup(context,widget.onServerConfigured),icon:const Icon(Icons.cloud_sync),label:const Text('ربط خادم مركزي / إنشاء المدير المركزي')),
