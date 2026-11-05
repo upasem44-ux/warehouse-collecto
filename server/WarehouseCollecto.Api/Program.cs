@@ -176,7 +176,8 @@ api.MapPost("/sync/receipts",async(SyncReceiptsRequest r,ClaimsPrincipal p,AppDb
     accepted.Add(x.OperationId);
     continue;
   }
-  if(!await db.Customers.AnyAsync(y=>y.Code==x.CustomerCode))
+  var customer=await db.Customers.SingleOrDefaultAsync(y=>y.Code==x.CustomerCode);
+  if(customer is null)
     return Results.BadRequest(new {message="Customer does not exist on the central server.",customerCode=x.CustomerCode});
   if(x.Method=="حوالة" && (string.IsNullOrWhiteSpace(x.Network)||string.IsNullOrWhiteSpace(x.TransferRef)))
     return Results.BadRequest(new {message="Transfer network and reference are required."});
@@ -184,6 +185,12 @@ api.MapPost("/sync/receipts",async(SyncReceiptsRequest r,ClaimsPrincipal p,AppDb
      (!seenTransfers.Add((x.Network??"")+"|"+x.TransferRef) ||
       await db.Receipts.AnyAsync(y=>y.Method=="حوالة"&&y.Network==x.Network&&y.TransferRef==x.TransferRef)))
     return Results.Conflict(new {message="Duplicate transfer reference.",operationId=x.OperationId});
+  switch(x.Currency){
+   case "yer": customer.BalanceYer-=x.Amount; break;
+   case "sar": customer.BalanceSar-=x.Amount; break;
+   case "usd": customer.BalanceUsd-=x.Amount; break;
+  }
+  customer.UpdatedAtUtc=DateTime.UtcNow;
   db.Receipts.Add(new Receipt{OperationId=x.OperationId,Number=x.Number,DistributorCode=distributor,CustomerCode=x.CustomerCode,CustomerName=x.CustomerName,Amount=x.Amount,Currency=x.Currency,Method=x.Method,Network=x.Network,TransferRef=x.TransferRef,Note=x.Note,CreatedAtUtc=x.CreatedAtUtc.ToUniversalTime()});
   accepted.Add(x.OperationId);
  }
