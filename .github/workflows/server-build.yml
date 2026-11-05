@@ -61,3 +61,25 @@ jobs:
           DIST_TOKEN=$(echo "$DIST_LOGIN" | jq -r '.accessToken')
           STATUS=$(curl -sS -o /tmp/forbidden.json -w '%{http_code}' http://127.0.0.1:5080/api/admin/receipts -H "Authorization: Bearer $DIST_TOKEN")
           test "$STATUS" = "403"
+
+          # Endpoint-specific protection: ten login attempts per five minutes per IP (two valid logins above count toward the limit).
+          for i in {1..8}; do
+            STATUS=$(curl -sS -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:5080/api/auth/login -H 'Content-Type: application/json' -d "$(printf '{\"username\":\"unknown-%s\",\"password\":\"not-a-real-password\"}' "$i")")
+            test "$STATUS" = "401"
+          done
+          STATUS=$(curl -sS -o /tmp/rate-limited-login.json -w '%{http_code}' -X POST http://127.0.0.1:5080/api/auth/login -H 'Content-Type: application/json' -d '{"username":"unknown-final","password":"not-a-real-password"}')
+          test "$STATUS" = "429"
+
+          # Bootstrap allows only three attempts per hour per IP (the successful
+          # first-admin bootstrap above counts as the first attempt).
+          for i in {1..2}; do
+            curl -sS -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:5080/api/auth/bootstrap -H 'Content-Type: application/json' -d '{"bootstrapKey":"wrong-key","username":"xadmin","displayName":"Wrong","distributorCode":"WRONG","password":"not-a-real-password"}' | grep -qx '401'
+          done
+          STATUS=$(curl -sS -o /tmp/rate-limited-bootstrap.json -w '%{http_code}' -X POST http://127.0.0.1:5080/api/auth/bootstrap -H 'Content-Type: application/json' -d '{"bootstrapKey":"wrong-key","username":"xadmin","displayName":"Wrong","distributorCode":"WRONG","password":"not-a-real-password"}')
+          test "$STATUS" = "429"
+
+          # API responses must not be cached and must carry baseline hardening headers.
+          HEADERS=$(curl -sSI http://127.0.0.1:5080/health)
+          echo "$HEADERS" | grep -qi '^Cache-Control: no-store'
+          echo "$HEADERS" | grep -qi '^X-Content-Type-Options: nosniff'
+          echo "$HEADERS" | grep -qi '^X-Frame-Options: DENY'
