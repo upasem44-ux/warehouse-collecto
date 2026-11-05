@@ -13,7 +13,37 @@ builder.Services.AddScoped<IPasswordHasher<AppUser>,PasswordHasher<AppUser>>();
 var secret=builder.Configuration["JWT_SECRET"];
 if(string.IsNullOrWhiteSpace(secret)||Encoding.UTF8.GetByteCount(secret)<32) throw new InvalidOperationException("JWT_SECRET must contain at least 32 UTF-8 bytes.");
 var key=new SymmetricSecurityKey(Encoding.UTF8.GetBytes(secret));
-builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme).AddJwtBearer(o=>o.TokenValidationParameters=new TokenValidationParameters { ValidateIssuer=true,ValidIssuer="WarehouseCollecto",ValidateAudience=true,ValidAudience="WarehouseCollecto.Mobile",ValidateIssuerSigningKey=true,IssuerSigningKey=key,ValidateLifetime=true,ClockSkew=TimeSpan.FromSeconds(30) });
+builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme).AddJwtBearer(o =>
+{
+    o.TokenValidationParameters = new TokenValidationParameters
+    {
+        ValidateIssuer = true,
+        ValidIssuer = "WarehouseCollecto",
+        ValidateAudience = true,
+        ValidAudience = "WarehouseCollecto.Mobile",
+        ValidateIssuerSigningKey = true,
+        IssuerSigningKey = key,
+        ValidateLifetime = true,
+        ClockSkew = TimeSpan.FromSeconds(30)
+    };
+    o.Events = new JwtBearerEvents
+    {
+        OnTokenValidated = async context =>
+        {
+            var subject = context.Principal?.FindFirstValue(ClaimTypes.NameIdentifier);
+            if (!long.TryParse(subject, out var userId))
+            {
+                context.Fail("Invalid user identity.");
+                return;
+            }
+
+            var db = context.HttpContext.RequestServices.GetRequiredService<AppDbContext>();
+            var active = await db.Users.AsNoTracking()
+                .AnyAsync(user => user.Id == userId && user.IsActive);
+            if (!active) context.Fail("Account is inactive.");
+        }
+    };
+});
 builder.Services.AddAuthorization();
 builder.Services.AddRateLimiter(options =>
 {
