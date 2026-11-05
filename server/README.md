@@ -1,38 +1,64 @@
-# Warehouse Collecto central server
+# Dawacom / Warehouse Collecto
 
-ASP.NET Core 10 API foundation for shared accounts and receipt synchronization.
+## Current implementation
 
-## Hosting
-Run on an always-on Windows shop server reachable by all distributor devices on the shop LAN. Configure a static LAN address or DHCP reservation, firewall access to TCP 5080, persistent database storage, and tested backups. For access outside the shop LAN, deploy behind HTTPS on a trusted host or use a properly configured VPN. Do not expose the plain HTTP listener directly to the public internet.
+This repository contains:
+- A Flutter Android collection app with local SQLite storage for customer data and receipts.
+- Central authentication and user administration through the ASP.NET Core API when a server URL is configured.
+- Secure token storage on Android and a time-limited cached offline session.
+- Customer download/import and receipt synchronization using per-operation IDs to make retries idempotent.
+- A self-contained Windows x64 package for hosting the central API.
+
+Local receipt entry remains available offline. Receipts are queued locally and uploaded when the device can reach the central server. The central API uses .NET 10 and SQLite.
+
+## Build artifacts
+
+GitHub Actions creates:
+- **Android APK:** workflow named `Build Android APK`; download the `warehouse-collector-app` artifact.
+- **Windows server:** workflow named `Publish Windows server`; download the `warehouse-collecto-windows-server` artifact.
+
+Artifacts are available from the repository's Actions page:
+https://github.com/upasem44-ux/warehouse-collecto/actions
+
+Use artifacts produced from the same `main` commit when preparing a release. The workflow artifacts expire after the retention period shown by GitHub.
+
+## Deploying the central server on the shop PC
+
+The server must run on an always-on Windows x64 PC reachable by all collection phones over the shop's private LAN.
 
 Required environment variables:
-- JWT_SECRET: cryptographically random secret, at least 32 UTF-8 bytes.
-- BOOTSTRAP_KEY: one-time secret used to create the first server administrator.
+- `JWT_SECRET`: cryptographically random secret, at least 32 UTF-8 bytes. Keep it unchanged across restarts.
+- `BOOTSTRAP_KEY`: one-time secret used only to create the first administrator.
 
-Create the first administrator with POST /api/auth/bootstrap. This endpoint refuses further bootstrap after the first user exists. Sign in through POST /api/auth/login. Administrators manage shared users through /api/admin/users. Authenticated devices upload receipts through POST /api/sync/receipts.
+1. Download and extract the `warehouse-collecto-windows-server` artifact into a permanent folder on the shop PC.
+2. Open PowerShell in that folder.
+3. Generate secrets and keep them private:
+   ```powershell
+   $env:JWT_SECRET = [Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(48))
+   $env:BOOTSTRAP_KEY = [Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(32))
+   ```
+4. Start `WarehouseCollecto.Api.exe` and keep the process running. The default listener is `http://0.0.0.0:5080`.
+5. Find the PC's private IPv4 address using `ipconfig`. Allow inbound TCP 5080 only on the Windows **Private** network profile:
+   ```powershell
+   New-NetFirewallRule -DisplayName "Warehouse Collecto LAN API" -Direction Inbound -Protocol TCP -LocalPort 5080 -Action Allow -Profile Private
+   ```
+6. On the administrator phone, configure the app with `http://SERVER-LAN-IP:5080`, then use the one-time bootstrap key to create the first central administrator.
+7. Create each distributor account from the administrator account. Configure the same server URL on each phone and sign in.
+8. After successful bootstrap, discard the bootstrap key. Keep `JWT_SECRET` private and unchanged.
 
-## Integration status
-This is the first central API foundation. Flutter still uses local SQLite for sign-in and data entry until its client networking, secure token storage, customer download, receipt upload/retry, and conflict handling are connected and tested. Existing device-local accounts are not automatically copied to the server. A server deployment and a reviewed import procedure are required before cross-device sign-in is operational.
+The app only permits plain HTTP for private IPv4 LAN addresses. Use HTTPS or a properly configured VPN for access outside the shop LAN. Never expose port 5080 directly to the public internet.
 
-## Production requirements
-Use HTTPS outside a trusted LAN, keep secrets out of source control, restrict server access, back up and test restore, and use reviewed EF Core migrations for schema changes. This initial prototype uses EnsureCreated and is not production-ready.
+## Data safety and release limitations
 
-## Build and run on the shop Windows PC
+**This is not yet certified for production financial use.** Passing CI tests and producing APK/server artifacts do not replace testing on the actual shop network and devices.
 
-A self-contained Windows x64 package is produced by the **Publish Windows server** GitHub Actions workflow. Download its `warehouse-collecto-windows-server` artifact and extract it into a permanent folder on the shop PC.
+Before recording real collections:
+- Test two or more phones against the same server, including offline entry, reconnect, duplicate retry, and conflicting transfer references.
+- Verify customer opening balances and receipt totals against the source accounting system.
+- The Flutter local SQLite schema currently stores monetary values using SQLite `REAL` and Dart `double`. The central API uses .NET `decimal`, but the local storage path still needs an exact-money migration (for example integer minor units) and migration tests before it can be treated as financially exact.
+- Confirm customer visibility and distributor assignment rules with the business owner; the current central customer endpoint returns the shared customer list to authenticated users.
+- Set up a managed Windows service, restricted firewall rules, monitoring, scheduled database backups, and a tested restore procedure. The server currently uses SQLite `EnsureCreated`; a reviewed schema migration strategy is still required.
+- Test the recovery procedure using a separate copy of the database before relying on backups.
+- LiveExPro import/synchronization is not implemented until its supported interface and data mapping are provided and tested.
 
-1. Open PowerShell in that folder.
-2. Generate a strong JWT secret and a one-time bootstrap key (keep both private):
-   `$env:JWT_SECRET = [Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(48))`
-   `$env:BOOTSTRAP_KEY = [Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(32))`
-3. Start `.WarehouseCollecto.Api.exe` from that folder. Keep the window/process running.
-4. Find the PC's private LAN IPv4 address using `ipconfig`. Allow TCP 5080 only on the Windows Private network profile.
-5. On the administrator phone, configure the app with `http://SERVER-LAN-IP:5080`, enter the one-time bootstrap key, and create the first central administrator. Other phones enter the same URL and sign in with accounts created by that administrator.
-6. After the first administrator is created, the bootstrap key can be discarded. Keep JWT_SECRET unchanged across restarts or all active tokens will become invalid.
-
-Example private-network firewall rule (run PowerShell as Administrator):
-`New-NetFirewallRule -DisplayName "Warehouse Collecto LAN API" -Direction Inbound -Protocol TCP -LocalPort 5080 -Action Allow -Profile Private`
-
-Do not expose port 5080 directly to the public internet. For remote access, use a VPN or a trusted HTTPS reverse proxy. The app allows plain HTTP only for private LAN IP addresses. Back up `warehouse-collecto.db` regularly and test restoration; stop the server before making a simple file copy backup.
-
-The server build is a foundation, not a completed production deployment. Before real-money use, configure a managed Windows service, backup rotation, monitoring, TLS/VPN access where needed, and reviewed EF Core migrations. The server currently uses SQLite with `EnsureCreated`; schema evolution still needs a production migration plan.
+Do not use the system as the sole financial record until these checks are completed and signed off.
