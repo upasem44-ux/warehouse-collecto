@@ -218,7 +218,7 @@ class LocalDatabase {
 
     return openDatabase(
       path,
-      version: 1,
+      version: 2,
       onConfigure: (db) async {
         await db.execute('PRAGMA foreign_keys = ON');
         await db.execute('PRAGMA journal_mode = WAL');
@@ -273,6 +273,29 @@ class LocalDatabase {
         ''');
 
         await _createIndexes(db);
+      },
+      onUpgrade: (db, oldVersion, newVersion) async {
+        if (oldVersion < 2) {
+          // Preserve legacy receipts while making transfer references unique.
+          await db.execute('''
+            UPDATE receipts
+            SET transfer_ref = 'LEGACY-' || id || '-' || transfer_ref
+            WHERE id NOT IN (
+              SELECT MAX(id)
+              FROM receipts
+              WHERE method = 'حوالة'
+                AND transfer_ref IS NOT NULL
+                AND transfer_ref != ''
+                AND status != 'draft'
+              GROUP BY network, transfer_ref
+            )
+              AND method = 'حوالة'
+              AND transfer_ref IS NOT NULL
+              AND transfer_ref != ''
+              AND status != 'draft'
+          ''');
+          await _createIndexes(db);
+        }
       },
     );
   }
