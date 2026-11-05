@@ -30,7 +30,7 @@ app.MapPost("/api/auth/login",async(LoginRequest r,AppDbContext db,IPasswordHash
  if(u is null||!u.IsActive||h.VerifyHashedPassword(u,u.PasswordHash,r.Password)==PasswordVerificationResult.Failed) return Results.Unauthorized();
  var claims=new[]{new Claim(ClaimTypes.NameIdentifier,u.Id.ToString()),new Claim(ClaimTypes.Name,u.Username),new Claim(ClaimTypes.Role,u.Role),new Claim("distributor_code",u.DistributorCode)};
  var token=new JwtSecurityToken("WarehouseCollecto","WarehouseCollecto.Mobile",claims,expires:DateTime.UtcNow.AddHours(8),signingCredentials:new SigningCredentials(key,SecurityAlgorithms.HmacSha256));
- return Results.Ok(new LoginResponse(new JwtSecurityTokenHandler().WriteToken(token),u.Username,u.DisplayName,u.DistributorCode,u.Role,token.ValidTo));
+ return Results.Ok(new LoginResponse(u.Id,new JwtSecurityTokenHandler().WriteToken(token),u.Username,u.DisplayName,u.DistributorCode,u.Role,token.ValidTo));
 });
 var admin=app.MapGroup("/api/admin").RequireAuthorization(p=>p.RequireRole("admin"));
 admin.MapGet("/users",async(AppDbContext db)=>Results.Ok(await db.Users.OrderBy(x=>x.Username).Select(x=>new UserResponse(x.Id,x.Username,x.DisplayName,x.DistributorCode,x.Role,x.IsActive)).ToListAsync()));
@@ -85,7 +85,7 @@ api.MapPost("/sync/receipts",async(SyncReceiptsRequest r,ClaimsPrincipal p,AppDb
 app.Run();
 record BootstrapRequest(string BootstrapKey,string Username,string DisplayName,string DistributorCode,string Password);
 record LoginRequest(string Username,string Password);
-record LoginResponse(string AccessToken,string Username,string DisplayName,string DistributorCode,string Role,DateTime ExpiresAtUtc);
+record LoginResponse(long Id,string AccessToken,string Username,string DisplayName,string DistributorCode,string Role,DateTime ExpiresAtUtc);
 record CreateUserRequest(string Username,string DisplayName,string DistributorCode,string Password,string Role);
 record UserResponse(long Id,string Username,string DisplayName,string DistributorCode,string Role,bool IsActive);
 record SetActiveRequest(bool IsActive);
