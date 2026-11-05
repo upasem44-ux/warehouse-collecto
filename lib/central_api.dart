@@ -34,7 +34,7 @@ class CentralApi {
     if(uri==null||!uri.hasAuthority||(uri.scheme!='https'&&uri.scheme!='http')) throw Exception('أدخل عنوان خادم صحيحاً');
     if(uri.scheme=='http'&&!_privateHost(uri.host)) throw Exception('الاتصال خارج شبكة المحل يجب أن يستخدم HTTPS');
     _baseUrl=value; _token=null; _username=null;
-    await _storage.write(key:_urlKey,value:value); await _storage.delete(key:_tokenKey); await _storage.delete(key:_usernameKey);
+    await _storage.write(key:_urlKey,value:value); await _storage.delete(key:_tokenKey); await _storage.delete(key:_usernameKey); await _storage.delete(key:_profileKey); await _storage.delete(key:_expiryKey); _cachedProfile=null; _expiresAtUtc=null;
   }
   Uri _uri(String path) { if(!configured) throw Exception('لم يتم إعداد الخادم المركزي'); return Uri.parse('$_baseUrl$path'); }
   Map<String,String> _headers({bool auth=false})=>{'Content-Type':'application/json','Accept':'application/json',if(auth&&authenticated)'Authorization':'Bearer $_token'};
