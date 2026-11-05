@@ -34,6 +34,33 @@ app.MapPost("/api/auth/login",async(LoginRequest r,AppDbContext db,IPasswordHash
 });
 var admin=app.MapGroup("/api/admin").RequireAuthorization(p=>p.RequireRole("admin"));
 admin.MapGet("/users",async(AppDbContext db)=>Results.Ok(await db.Users.OrderBy(x=>x.Username).Select(x=>new UserResponse(x.Id,x.Username,x.DisplayName,x.DistributorCode,x.Role,x.IsActive)).ToListAsync()));
+admin.MapPost("/customers/import", async(CustomerImportRequest request, AppDbContext db) =>
+{
+    if (request.Customers.Count > 2000) return Results.BadRequest(new { message = "Maximum batch size is 2000." });
+    foreach (var item in request.Customers)
+    {
+        if (string.IsNullOrWhiteSpace(item.Code) || string.IsNullOrWhiteSpace(item.Name) ||
+            item.Code.Length > 60 || item.Name.Length > 200 ||
+            item.BalanceYer < 0 || item.BalanceSar < 0 || item.BalanceUsd < 0)
+            return Results.BadRequest(new { message = "Invalid customer data." });
+        var code = item.Code.Trim();
+        var customer = await db.Customers.FindAsync(code);
+        if (customer is null)
+        {
+            customer = new Customer { Code = code };
+            db.Customers.Add(customer);
+        }
+        customer.Name = item.Name.Trim();
+        customer.Area = item.Area ?? "";
+        customer.Phone = item.Phone ?? "";
+        customer.BalanceYer = item.BalanceYer;
+        customer.BalanceSar = item.BalanceSar;
+        customer.BalanceUsd = item.BalanceUsd;
+        customer.UpdatedAtUtc = DateTime.UtcNow;
+    }
+    await db.SaveChangesAsync();
+    return Results.Ok(new { imported = request.Customers.Count });
+});
 admin.MapPost("/users",async(CreateUserRequest r,AppDbContext db,IPasswordHasher<AppUser> h)=>{
  if(r.Username.Trim().Length<3||r.Password.Length<12||string.IsNullOrWhiteSpace(r.DisplayName)||string.IsNullOrWhiteSpace(r.DistributorCode)||(r.Role!="admin"&&r.Role!="distributor")) return Results.BadRequest();
  var u=new AppUser{Username=r.Username.Trim(),DisplayName=r.DisplayName.Trim(),DistributorCode=r.DistributorCode.Trim().ToUpperInvariant(),Role=r.Role}; u.PasswordHash=h.HashPassword(u,r.Password); db.Users.Add(u);
@@ -63,5 +90,7 @@ record CreateUserRequest(string Username,string DisplayName,string DistributorCo
 record UserResponse(long Id,string Username,string DisplayName,string DistributorCode,string Role,bool IsActive);
 record SetActiveRequest(bool IsActive);
 record ResetPasswordRequest(string NewPassword);
+record CustomerImportRequest(List<CustomerImportItem> Customers);
+record CustomerImportItem(string Code,string Name,string? Area,string? Phone,decimal BalanceYer,decimal BalanceSar,decimal BalanceUsd);
 record SyncReceiptsRequest(List<ReceiptSyncItem> Receipts);
 record ReceiptSyncItem(string OperationId,string Number,string DistributorCode,string CustomerCode,string CustomerName,decimal Amount,string Currency,string Method,string? Network,string? TransferRef,string? Note,DateTime CreatedAtUtc);
