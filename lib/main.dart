@@ -2853,10 +2853,16 @@ class _HistoryPageState extends State<HistoryPage> {
                               ),
                             ),
                             const SizedBox(height: 5),
-                            const Text(
-                              'بانتظار المزامنة',
+                            Text(
+                              r.syncStatus == 'synced'
+                                  ? 'تمت المزامنة'
+                                  : r.syncStatus == 'failed'
+                                      ? 'فشلت المزامنة'
+                                      : 'بانتظار المزامنة',
                               style: TextStyle(
-                                color: AppColors.orange,
+                                color: r.syncStatus == 'synced'
+                                    ? AppColors.green
+                                    : AppColors.orange,
                                 fontSize: 9,
                               ),
                             ),
