@@ -221,6 +221,7 @@ class LocalDatabase {
   Database? _db;
 
   static String distributorCode = '1001';
+  static String currentRole = 'distributor';
 
   Future<Database> get database async {
     if (_db != null) return _db!;
@@ -419,6 +420,12 @@ class LocalDatabase {
         );
       }
     });
+  }
+
+  Future<void> saveRemoteCustomers(List<Map<String,dynamic>> rows) async {
+    for (final row in rows) {
+      await saveCustomer(CustomerRecord(code:row['code']?.toString()??'',name:row['name']?.toString()??'',area:row['area']?.toString()??'',phone:row['phone']?.toString()??'',balanceYer:(row['balanceYer'] as num?)?.toDouble()??0,balanceSar:(row['balanceSar'] as num?)?.toDouble()??0,balanceUsd:(row['balanceUsd'] as num?)?.toDouble()??0));
+    }
   }
 
   // ----------------------------------------------------------
@@ -694,6 +701,26 @@ class LocalDatabase {
 
 final dbRepo = LocalDatabase.instance;
 
+Future<int> syncCentralData() async {
+  final api=CentralApi.instance;
+  if(!api.authenticated)return 0;
+  final remoteCustomers=await api.customers();
+  await dbRepo.saveRemoteCustomers(remoteCustomers);
+  if(LocalDatabase.currentRole=='admin'){
+    final local=await dbRepo.getCustomers();
+    if(local.isNotEmpty) await api.importCustomers(local.map((c)=>{'code':c.code,'name':c.name,'area':c.area,'phone':c.phone,'balanceYer':c.balanceYer,'balanceSar':c.balanceSar,'balanceUsd':c.balanceUsd}).toList());
+  }
+  final pending=await dbRepo.getPendingReceipts(); var synced=0;
+  for(var start=0;start<pending.length;start+=250){
+    final batch=pending.skip(start).take(250).toList();
+    final payload=batch.map((r)=>{'operationId':r.operationId,'number':r.number,'distributorCode':r.distributorCode,'customerCode':r.customerCode,'customerName':r.customerName,'amount':r.amount,'currency':r.currency.name,'method':r.method,'network':r.network,'transferRef':r.transferRef,'note':r.note,'createdAtUtc':r.createdAt.toUtc().toIso8601String()}).toList();
+    final accepted=await api.syncReceipts(payload); await dbRepo.markReceiptsSynced(accepted); synced+=accepted.length;
+  }
+  return synced;
+}
+
+
+
 // ============================================================
 // 5. الرسائل العامة
 // ============================================================
@@ -723,7 +750,7 @@ class _AuthGateState extends State<AuthGate>{
  bool loading=true,setup=false;UserAccount? user;
  @override void initState(){super.initState();check();}
  Future<void> check()async{try{final n=await dbRepo.getUserCount();if(mounted)setState((){setup=n==0&&!CentralApi.instance.configured;loading=false;});}catch(e){if(mounted)setState(()=>loading=false);showMsg('تعذر فتح قاعدة البيانات: $e',error:true);}}
- void enter(UserAccount u){LocalDatabase.distributorCode=u.distributorCode;setState(() { user=u; setup=false; });}
+ void enter(UserAccount u){LocalDatabase.distributorCode=u.distributorCode;LocalDatabase.currentRole=u.role;setState(() { user=u; setup=false; });}
  @override Widget build(BuildContext c){if(loading)return const Scaffold(body:Center(child:CircularProgressIndicator()));if(setup)return FirstAdminPage(onDone:enter,onServerConfigured:check);if(user==null)return LoginPage(onLogin:enter);return CollectorShell(user:user!,onLogout:()async{await CentralApi.instance.logout();if(mounted)setState(()=>user=null);});}
 }
 class FirstAdminPage extends StatefulWidget{final ValueChanged<UserAccount> onDone;final VoidCallback onServerConfigured;const FirstAdminPage({super.key,required this.onDone,required this.onServerConfigured});@override State<FirstAdminPage> createState()=>_FirstAdminPageState();}
@@ -918,7 +945,7 @@ class _UserManagementPageState extends State<UserManagementPage>{
    TextField(controller:code,decoration:const InputDecoration(labelText:'رمز الموزع الفريد')),
    TextField(controller:p,obscureText:true,decoration:const InputDecoration(labelText:'كلمة المرور (10 أحرف على الأقل)')),
   ])),actions:[TextButton(onPressed:()=>Navigator.pop(ctx,false),child:const Text('إلغاء')),FilledButton(onPressed:()=>Navigator.pop(ctx,true),child:const Text('إنشاء'))]));
-  if(ok==true){try{await dbRepo.createAccount(username:u.text,displayName:n.text,distributorCode:code.text,password:p.text,role:'distributor');reload();showMsg('تم إنشاء الحساب محلياً على هذا الجهاز.');}catch(e){showMsg('تعذر إنشاء الحساب: $e',error:true);}}
+  if(ok==true){try{await dbRepo.createAccount(username:u.text,displayName:n.text,distributorCode:code.text,password:p.text,role:'distributor');reload();showMsg(CentralApi.instance.authenticated?'تم إنشاء الحساب على الخادم المركزي.':'تم إنشاء الحساب محلياً على هذا الجهاز فقط.');}catch(e){showMsg('تعذر إنشاء الحساب: $e',error:true);}}
   n.dispose();u.dispose();code.dispose();p.dispose();
  }
  Future<void> reset(UserAccount x)async{final p=TextEditingController();final v=await showDialog<String>(context:context,builder:(ctx)=>AlertDialog(title:Text('كلمة مرور ${x.displayName}'),content:TextField(controller:p,obscureText:true,decoration:const InputDecoration(labelText:'كلمة المرور الجديدة')),actions:[TextButton(onPressed:()=>Navigator.pop(ctx),child:const Text('إلغاء')),FilledButton(onPressed:()=>Navigator.pop(ctx,p.text),child:const Text('حفظ'))]));p.dispose();if(v==null||v.isEmpty)return;try{await dbRepo.changeUserPassword(x.id,v);showMsg('تم تغيير كلمة المرور');}catch(e){showMsg('$e',error:true);}}
@@ -926,7 +953,7 @@ class _UserManagementPageState extends State<UserManagementPage>{
  @override Widget build(BuildContext c)=>Column(children:[
  Padding(padding:const EdgeInsets.all(16),child:Row(children:[const Expanded(child:Text('إدارة حسابات الموزعين',style:TextStyle(fontSize:18,fontWeight:FontWeight.bold))),FilledButton.icon(onPressed:add,icon:const Icon(Icons.person_add),label:const Text('إضافة مستخدم'))])),
  Expanded(child:FutureBuilder<List<UserAccount>>(future:future,builder:(c,s){if(s.connectionState==ConnectionState.waiting)return const Center(child:CircularProgressIndicator());if(s.hasError)return Center(child:Text(s.error.toString()));final users=s.data??[];return ListView.builder(itemCount:users.length,itemBuilder:(c,i){final x=users[i];return Card(child:ListTile(leading:Icon(x.isAdmin?Icons.admin_panel_settings:Icons.delivery_dining),title:Text(x.displayName),subtitle:Text('${x.username} • ${x.distributorCode} • ${x.isActive ? 'نشط' : 'موقوف'}'),trailing:x.isAdmin?const Icon(Icons.verified_user):PopupMenuButton<String>(onSelected:(v){if(v=='toggle')toggle(x);if(v=='password')reset(x);},itemBuilder:(_)=>[PopupMenuItem(value:'toggle',child:Text(x.isActive?'إيقاف الحساب':'تفعيل الحساب')),const PopupMenuItem(value:'password',child:Text('تغيير كلمة المرور'))])));});})),
- const Padding(padding:EdgeInsets.all(10),child:Text('الحسابات في هذه النسخة محلية؛ لن تنتقل إلى هاتف موزّع آخر إلا بعد ربط خادم مركزي.',style:TextStyle(color:AppColors.orange,fontSize:10),textAlign:TextAlign.center)),
+ Padding(padding:const EdgeInsets.all(10),child:Text(CentralApi.instance.authenticated?'الحسابات تدار من الخادم المركزي وتظهر على الأجهزة المتصلة به.':'الحسابات المحلية لا تنتقل بين الأجهزة. اربط الخادم المركزي لتفعيل المشاركة.',style:const TextStyle(color:AppColors.orange,fontSize:10),textAlign:TextAlign.center)),
  ]);
 }
 
@@ -1197,6 +1224,7 @@ class _DashboardPageState extends State<DashboardPage> {
   }
 
   Future<_DashboardData> loadData() async {
+    try { await syncCentralData(); } catch (_) { /* Local/offline mode remains available. */ }
     final customers = await dbRepo.getCustomers();
     final receipts = await dbRepo.getReceipts();
     final totals = await dbRepo.getLocalTotals();
