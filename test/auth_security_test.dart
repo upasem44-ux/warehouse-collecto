@@ -26,6 +26,41 @@ void main() {
     });
   });
 
+  test('central user mapping preserves the server identity', () {
+    final user = UserAccount.fromServerMap({
+      'id': 42,
+      'username': 'field.user',
+      'displayName': 'Field User',
+      'distributorCode': 'D-42',
+      'role': 'distributor',
+      'isActive': true,
+    });
+    expect(user.id, 42);
+    expect(user.distributorCode, 'D-42');
+    expect(user.isAdmin, isFalse);
+  });
+
+  test('central receipt mapping preserves server receipt fields', () {
+    final receipt = ReceiptModel.fromServerMap({
+      'id': 7,
+      'operationId': 'operation-00000007',
+      'number': 'DWK-D42-20261105-0007',
+      'distributorCode': 'D42',
+      'customerCode': 'C100',
+      'customerName': 'Test Customer',
+      'amount': 1250.50,
+      'currency': 'yer',
+      'method': 'نقد',
+      'createdAtUtc': '2026-11-05T10:30:00Z',
+    });
+    expect(receipt.id, 7);
+    expect(receipt.operationId, 'operation-00000007');
+    expect(receipt.amount, 1250.50);
+    expect(receipt.status, ReceiptStatus.posted);
+    expect(receipt.syncStatus, 'synced');
+    expect(receipt.currency, CurrencyType.yer);
+  });
+
   test('user account model identifies administrator role', () {
     final user = UserAccount.fromMap({
       'id': 1,

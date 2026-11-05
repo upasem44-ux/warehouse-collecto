@@ -22,3 +22,42 @@ jobs:
         run: dotnet restore server/WarehouseCollecto.Api/WarehouseCollecto.Api.csproj
       - name: Build
         run: dotnet build server/WarehouseCollecto.Api/WarehouseCollecto.Api.csproj --no-restore --configuration Release
+
+      - name: API integration smoke test
+        shell: bash
+        env:
+          JWT_SECRET: "ci-only-signing-secret-that-is-long-enough-for-hmac-sha256"
+          BOOTSTRAP_KEY: "ci-only-bootstrap-key"
+        run: |
+          set -euo pipefail
+          dotnet run --no-build --configuration Release --project server/WarehouseCollecto.Api/WarehouseCollecto.Api.csproj --urls http://127.0.0.1:5080 > /tmp/warehouse-api.log 2>&1 &
+          API_PID=$!
+          trap 'kill "$API_PID" 2>/dev/null || true' EXIT
+          for i in {1..30}; do
+            if curl -fsS http://127.0.0.1:5080/health >/dev/null; then break; fi
+            sleep 1
+          done
+          if ! curl -fsS http://127.0.0.1:5080/health | jq -e '.status == "ok"'; then cat /tmp/warehouse-api.log; exit 1; fi
+          curl -fsS -X POST http://127.0.0.1:5080/api/auth/bootstrap -H 'Content-Type: application/json' -d '{"bootstrapKey":"ci-only-bootstrap-key","username":"admin","displayName":"CI Admin","distributorCode":"ADMIN","password":"CI-Only-Strong-Password-2026"}' | jq -e '.role == "admin"'
+          LOGIN=$(curl -fsS -X POST http://127.0.0.1:5080/api/auth/login -H 'Content-Type: application/json' -d '{"username":"admin","password":"CI-Only-Strong-Password-2026"}')
+          TOKEN=$(echo "$LOGIN" | jq -r '.accessToken')
+          test -n "$TOKEN" && test "$TOKEN" != "null"
+          curl -fsS -X POST http://127.0.0.1:5080/api/admin/customers/import -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d '{"customers":[{"code":"C100","name":"CI Customer","area":"","phone":"","balanceYer":10000,"balanceSar":0,"balanceUsd":0}]}' | jq -e '.imported == 1'
+          RECEIPT='{"receipts":[{"operationId":"ci-operation-000001","number":"CI-RECEIPT-0001","distributorCode":"ADMIN","customerCode":"C100","customerName":"CI Customer","amount":100,"currency":"yer","method":"نقد","network":null,"transferRef":null,"note":"smoke test","createdAtUtc":"2026-11-05T10:00:00Z"}]}'
+          curl -fsS -X POST http://127.0.0.1:5080/api/sync/receipts -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d "$RECEIPT" | jq -e '.acceptedOperationIds == ["ci-operation-000001"]'
+          curl -fsS -X POST http://127.0.0.1:5080/api/sync/receipts -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d "$RECEIPT" | jq -e '.acceptedOperationIds == ["ci-operation-000001"]'
+          BALANCE=$(curl -fsS http://127.0.0.1:5080/api/customers -H "Authorization: Bearer $TOKEN" | jq -r '.[0].balanceYer')
+          test "$BALANCE" = "9900.0" || test "$BALANCE" = "9900"
+          curl -fsS http://127.0.0.1:5080/api/admin/receipts -H "Authorization: Bearer $TOKEN" | jq -e 'length == 1'
+          # Reusing an operation ID with altered financial data must be rejected.
+          ALTERED=$(echo "$RECEIPT" | sed 's/"amount":100/"amount":999/')
+          STATUS=$(curl -sS -o /tmp/altered.json -w '%{http_code}' -X POST http://127.0.0.1:5080/api/sync/receipts -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d "$ALTERED")
+          test "$STATUS" = "409"
+          BALANCE=$(curl -fsS http://127.0.0.1:5080/api/customers -H "Authorization: Bearer $TOKEN" | jq -r '.[0].balanceYer')
+          test "$BALANCE" = "9900.0" || test "$BALANCE" = "9900"
+          # A distributor token must not access administrator receipt history.
+          curl -fsS -X POST http://127.0.0.1:5080/api/admin/users -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d '{"username":"dist-ci","displayName":"CI Distributor","distributorCode":"D-CI","password":"CI-Only-Distributor-Password-2026","role":"distributor"}' | jq -e '.role == "distributor"'
+          DIST_LOGIN=$(curl -fsS -X POST http://127.0.0.1:5080/api/auth/login -H 'Content-Type: application/json' -d '{"username":"dist-ci","password":"CI-Only-Distributor-Password-2026"}')
+          DIST_TOKEN=$(echo "$DIST_LOGIN" | jq -r '.accessToken')
+          STATUS=$(curl -sS -o /tmp/forbidden.json -w '%{http_code}' http://127.0.0.1:5080/api/admin/receipts -H "Authorization: Bearer $DIST_TOKEN")
+          test "$STATUS" = "403"
