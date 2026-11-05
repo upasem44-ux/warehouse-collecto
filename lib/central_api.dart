@@ -43,7 +43,7 @@ class CentralApi {
     if(r.statusCode>=200&&r.statusCode<300)return body;
     if(r.statusCode==401)throw Exception('بيانات الدخول غير صحيحة أو انتهت الجلسة');
     if(r.statusCode==403)throw Exception('ليس لديك صلاحية');
-    if(r.statusCode==409)throw Exception('تعارض بيانات: ' + (body is Map ? (body['message']?.toString()??'السجل موجود مسبقاً') : 'السجل موجود مسبقاً'));
+    if(r.statusCode==409){ final message=body is Map ? (body['message']?.toString()??'السجل موجود مسبقاً') : 'السجل موجود مسبقاً'; throw Exception('تعارض بيانات: $message'); }
     throw Exception('الخادم رفض الطلب (${r.statusCode})');
   }
   Future<void> health() async { _decode(await http.get(_uri('/health')).timeout(_timeout)); }
