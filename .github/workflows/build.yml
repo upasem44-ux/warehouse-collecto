@@ -32,10 +32,15 @@ jobs:
           flutter create . --platforms=android --org com.dawakom
           cp -r temp_backup/lib/* lib/
           cp temp_backup/pubspec.yaml .
-          rm -rf temp_backup test
+          rm -rf temp_backup
+          if [ -f test/widget_test.dart ] && grep -q 'MyApp' test/widget_test.dart; then rm -f test/widget_test.dart; fi
+          rmdir test 2>/dev/null || true
 
       - name: Install Dependencies
         run: flutter pub get
+
+      - name: Run automated tests
+        run: flutter test --no-pub
 
       - name: Analyze Dart code
         run: flutter analyze --no-pub lib
