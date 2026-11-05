@@ -1,0 +1,18 @@
+name: Publish Windows server
+on:
+  workflow_dispatch:
+jobs:
+  publish:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+      - name: Publish self-contained Windows server
+        run: dotnet publish server/WarehouseCollecto.Api/WarehouseCollecto.Api.csproj --configuration Release --runtime win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true --output publish/server
+      - uses: actions/upload-artifact@v4
+        with:
+          name: warehouse-collecto-windows-server
+          path: publish/server/
+          if-no-files-found: error
