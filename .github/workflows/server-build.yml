@@ -30,14 +30,14 @@ jobs:
           BOOTSTRAP_KEY: "ci-only-bootstrap-key"
         run: |
           set -euo pipefail
-          dotnet run --no-build --project server/WarehouseCollecto.Api/WarehouseCollecto.Api.csproj --urls http://127.0.0.1:5080 > /tmp/warehouse-api.log 2>&1 &
+          dotnet run --no-build --configuration Release --project server/WarehouseCollecto.Api/WarehouseCollecto.Api.csproj --urls http://127.0.0.1:5080 > /tmp/warehouse-api.log 2>&1 &
           API_PID=$!
           trap 'kill "$API_PID" 2>/dev/null || true' EXIT
           for i in {1..30}; do
             if curl -fsS http://127.0.0.1:5080/health >/dev/null; then break; fi
             sleep 1
           done
-          curl -fsS http://127.0.0.1:5080/health | jq -e '.status == "ok"'
+          if ! curl -fsS http://127.0.0.1:5080/health | jq -e '.status == "ok"'; then cat /tmp/warehouse-api.log; exit 1; fi
           curl -fsS -X POST http://127.0.0.1:5080/api/auth/bootstrap -H 'Content-Type: application/json' -d '{"bootstrapKey":"ci-only-bootstrap-key","username":"admin","displayName":"CI Admin","distributorCode":"ADMIN","password":"CI-Only-Strong-Password-2026"}' | jq -e '.role == "admin"'
           LOGIN=$(curl -fsS -X POST http://127.0.0.1:5080/api/auth/login -H 'Content-Type: application/json' -d '{"username":"admin","password":"CI-Only-Strong-Password-2026"}')
           TOKEN=$(echo "$LOGIN" | jq -r '.accessToken')
