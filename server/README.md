@@ -46,7 +46,33 @@ Required environment variables:
 7. Create each distributor account from the administrator account. Configure the same server URL on each phone and sign in.
 8. After successful bootstrap, discard the bootstrap key. Keep `JWT_SECRET` private and unchanged.
 
-The app only permits plain HTTP for private IPv4 LAN addresses. Use HTTPS or a properly configured VPN for access outside the shop LAN. Never expose port 5080 directly to the public internet.
+**Important transport limitation:** the current shop-LAN setup uses plain HTTP. That means traffic (including bearer tokens and customer/receipt data) is not encrypted between phones and the server. The app restricts HTTP configuration to private IPv4 addresses, but that is not a substitute for TLS and does not stop an attacker already on the same Wi-Fi/LAN from observing or modifying traffic. Treat this as an isolated-LAN pilot configuration only. For production or any untrusted network, deploy HTTPS with a certificate trusted by the Android devices, or use a properly configured VPN. Never expose port 5080 directly to the public internet.
+
+## Minimum secure shop-network checklist
+
+Before connecting any real phone:
+- Update Windows fully and use a dedicated Windows account for the API; do not run the server as an administrator.
+- Set the shop router to WPA2-AES or WPA3 with a unique strong Wi-Fi password. Disable WPS and change the router's default administrator password.
+- Put the server and collection phones on a private shop network. Do not use guest Wi-Fi, public Wi-Fi, or a network shared with customers/visitors.
+- Do not configure router port-forwarding, DMZ, UPnP exposure, or remote administration for port 5080.
+- Keep the Windows firewall rule limited to the Private profile and TCP 5080. Do not create a broad "allow all" rule. If practical, restrict the rule further to the shop LAN subnet.
+- Use a unique administrator username and a long, unique password. Create separate distributor accounts; never share one account between people. Deactivate accounts immediately when access is no longer needed.
+- The API applies per-IP rate limits to login and bootstrap, validates the one-time bootstrap key in constant time, and adds no-store/security response headers. These are defense-in-depth controls, not complete protection.
+- Keep the Windows host physically secured and prevent unauthorized access to the server folder and SQLite database file.
+- Keep `JWT_SECRET` private and unchanged. Do not paste it, `BOOTSTRAP_KEY`, passwords, or access tokens into chats, screenshots, GitHub issues, or source files. Do not commit secrets to Git.
+- After bootstrap, remove the bootstrap key from the process environment and do not reuse it. If it is ever exposed, treat the setup as compromised and plan a controlled re-bootstrap/recovery.
+- Keep a written list of authorized devices/users and periodically review active accounts.
+
+## Backup and recovery precautions
+
+The server database is a financial record. Until automated, verified backup/restore is implemented:
+1. Stop the API cleanly before making a file-copy backup of `warehouse-collecto.db`; do not rely on copying a live SQLite database file while writes are occurring.
+2. Copy the database to a separate encrypted drive or protected backup location. Keep at least one backup disconnected from the server.
+3. Label backups with date/time and restrict access to the administrator only.
+4. Test restoring a copy into a separate test folder and verify customer balances and receipt counts before considering the backup usable.
+5. Never overwrite the live database during a restore test.
+
+A backup that has not been restored and checked is not a proven backup.
 
 ## Data safety and release limitations
 
