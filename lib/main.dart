@@ -577,7 +577,7 @@ class LocalDatabase {
       final currentBalance = (customerRows.first[balanceColumn] as num?)?.toDouble() ?? 0;
       await txn.update(
         'customers',
-        {'$balanceColumn': currentBalance - amount, 'updated_at': DateTime.now().toUtc().toIso8601String()},
+        {balanceColumn: currentBalance - amount, 'updated_at': DateTime.now().toUtc().toIso8601String()},
         where: 'code = ?',
         whereArgs: [savedCustomer.code],
       );
