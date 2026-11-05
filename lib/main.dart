@@ -167,6 +167,30 @@ class ReceiptModel {
     this.operationId = '',
   });
 
+  factory ReceiptModel.fromServerMap(Map<String, dynamic> map) {
+    final currencyName = map['currency']?.toString() ?? 'yer';
+    return ReceiptModel(
+      id: (map['id'] as num?)?.toInt(),
+      number: map['number']?.toString() ?? '',
+      distributorCode: map['distributorCode']?.toString() ?? '',
+      customerCode: map['customerCode']?.toString() ?? '',
+      customerName: map['customerName']?.toString() ?? '',
+      amount: (map['amount'] as num?)?.toDouble() ?? 0,
+      currency: CurrencyType.values.firstWhere(
+        (e) => e.name == currencyName,
+        orElse: () => CurrencyType.yer,
+      ),
+      method: map['method']?.toString() ?? '',
+      network: map['network']?.toString(),
+      transferRef: map['transferRef']?.toString(),
+      note: map['note']?.toString(),
+      status: ReceiptStatus.posted,
+      createdAt: DateTime.tryParse(map['createdAtUtc']?.toString() ?? '')?.toLocal() ?? DateTime.now(),
+      syncStatus: 'synced',
+      operationId: map['operationId']?.toString() ?? '',
+    );
+  }
+
   factory ReceiptModel.fromMap(Map<String, Object?> map) {
     return ReceiptModel(
       id: map['id'] as int?,
@@ -2573,12 +2597,34 @@ class _HistoryPageState extends State<HistoryPage> {
   @override
   void initState() {
     super.initState();
-    future = dbRepo.getReceipts(limit: 2000);
+    future = loadReceipts();
+  }
+
+  Future<List<ReceiptModel>> loadReceipts() async {
+    final local = await dbRepo.getReceipts(limit: 2000);
+    if (LocalDatabase.currentRole != 'admin' || !CentralApi.instance.authenticated) {
+      return local;
+    }
+    try {
+      final remote = await CentralApi.instance.adminReceipts();
+      final merged = <String, ReceiptModel>{
+        for (final item in local) item.operationId: item,
+      };
+      for (final row in remote) {
+        final item = ReceiptModel.fromServerMap(row);
+        merged[item.operationId] = item;
+      }
+      final result = merged.values.toList()
+        ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+      return result.take(2000).toList();
+    } catch (_) {
+      return local;
+    }
   }
 
   Future<void> reload() async {
     setState(() {
-      future = dbRepo.getReceipts(limit: 2000);
+      future = loadReceipts();
     });
 
     await future;
@@ -2674,9 +2720,11 @@ class _HistoryPageState extends State<HistoryPage> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const SectionTitle(
+                SectionTitle(
                   title: 'سجل سندات القبض',
-                  subtitle: 'جميع السندات المحفوظة على هذا الجهاز',
+                  subtitle: LocalDatabase.currentRole == 'admin' && CentralApi.instance.authenticated
+                      ? 'السجل المركزي لآخر 2000 سند من جميع الموزعين'
+                      : 'جميع السندات المحفوظة على هذا الجهاز',
                 ),
                 SingleChildScrollView(
                   scrollDirection: Axis.horizontal,
