@@ -49,3 +49,15 @@ jobs:
           BALANCE=$(curl -fsS http://127.0.0.1:5080/api/customers -H "Authorization: Bearer $TOKEN" | jq -r '.[0].balanceYer')
           test "$BALANCE" = "9900.0" || test "$BALANCE" = "9900"
           curl -fsS http://127.0.0.1:5080/api/admin/receipts -H "Authorization: Bearer $TOKEN" | jq -e 'length == 1'
+          # Reusing an operation ID with altered financial data must be rejected.
+          ALTERED=$(echo "$RECEIPT" | sed 's/"amount":100/"amount":999/')
+          STATUS=$(curl -sS -o /tmp/altered.json -w '%{http_code}' -X POST http://127.0.0.1:5080/api/sync/receipts -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d "$ALTERED")
+          test "$STATUS" = "409"
+          BALANCE=$(curl -fsS http://127.0.0.1:5080/api/customers -H "Authorization: Bearer $TOKEN" | jq -r '.[0].balanceYer')
+          test "$BALANCE" = "9900.0" || test "$BALANCE" = "9900"
+          # A distributor token must not access administrator receipt history.
+          curl -fsS -X POST http://127.0.0.1:5080/api/admin/users -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d '{"username":"dist-ci","displayName":"CI Distributor","distributorCode":"D-CI","password":"CI-Only-Distributor-Password-2026","role":"distributor"}' | jq -e '.role == "distributor"'
+          DIST_LOGIN=$(curl -fsS -X POST http://127.0.0.1:5080/api/auth/login -H 'Content-Type: application/json' -d '{"username":"dist-ci","password":"CI-Only-Distributor-Password-2026"}')
+          DIST_TOKEN=$(echo "$DIST_LOGIN" | jq -r '.accessToken')
+          STATUS=$(curl -sS -o /tmp/forbidden.json -w '%{http_code}' http://127.0.0.1:5080/api/admin/receipts -H "Authorization: Bearer $DIST_TOKEN")
+          test "$STATUS" = "403"
