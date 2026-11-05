@@ -777,7 +777,7 @@ class _LoginPageState extends State<LoginPage>{
       UserAccount? account;
       if (CentralApi.instance.configured) {
         final remote = await CentralApi.instance.login(u.text,p.text);
-        account = UserAccount.fromServerMap({...remote,'id':0,'isActive':true});
+        account = UserAccount.fromServerMap({...remote,'isActive':true});
       } else {
         account = await dbRepo.authenticate(u.text, p.text);
       }
